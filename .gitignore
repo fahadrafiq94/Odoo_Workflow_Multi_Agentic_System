@@ -1,0 +1,15 @@
+tests/
+readme/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+companion_pairing.json
+companion_state/
+customer_screen/.venv/
+customer_screen/companion_pairing.json
+customer_screen/customer_state/
+customer_screen/face_landmarker.task

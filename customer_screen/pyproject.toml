@@ -1,0 +1,6 @@
+[project]
+name = "erp-bar-customer-screen"
+version = "0.1.0"
+description = "Local smile camera and paired ERP_BAR customer/Odoo screen"
+requires-python = ">=3.11,<3.13"
+dependencies = ["mediapipe>=0.10.21,<0.11", "opencv-contrib-python>=4.10,<5", "numpy>=1.26,<3", "playwright>=1.49,<2"]
