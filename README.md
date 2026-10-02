@@ -15,7 +15,6 @@ A multi-agent order-fulfillment demo that connects local language models to Odoo
 - [Camera and Odoo on a second computer](#camera-and-odoo-on-a-second-computer)
 - [Business policies](#business-policies)
 - [Command-line options](#command-line-options)
-- [Tests and verification](#tests-and-verification)
 - [Project layout](#project-layout)
 - [Local state and recovery](#local-state-and-recovery)
 - [Troubleshooting](#troubleshooting)
