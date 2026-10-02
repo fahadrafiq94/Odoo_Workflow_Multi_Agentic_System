@@ -2,6 +2,7 @@
 import threading
 import time
 from urllib.parse import urlencode, urlsplit
+from .diagnostics import error_text
 
 LIST_ACTIONS = {'product.product': 'product.product_normal_action_sell',
                 'sale.order': 'sale.action_orders', 'purchase.order': 'purchase.purchase_rfq',
@@ -69,6 +70,8 @@ class OdooDisplay:
         self.stop = threading.Event()
         self.window_requested = False
         self.auto_follow = False
+        self.launch_failed = False
+        self.launch_error = ''
 
     def open(self, split_url=None, auto_follow=False):
         if not self.base:
@@ -87,6 +90,8 @@ class OdooDisplay:
                 self.layout_requested = True
             if self.thread and self.thread.is_alive():
                 return
+            self.launch_failed = False
+            self.launch_error = ''
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
 
@@ -232,7 +237,9 @@ class OdooDisplay:
                     if context:
                         context.close()
         except Exception as exc:
-            self.status = 'Browser unavailable: ' + type(exc).__name__ + '. Check browser installation, login and Odoo URL.'
+            self.launch_failed = True
+            self.launch_error = error_text(exc)
+            self.status = 'Browser unavailable: ' + self.launch_error
         finally:
             self.available = False
             self.following = False

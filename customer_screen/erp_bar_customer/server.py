@@ -31,6 +31,8 @@ def make_server(app, port=8770):
             path = urlsplit(self.path).path
             if path == '/api/state':
                 return self.reply(200, app.snapshot())
+            if path == '/api/diagnostics':
+                return self.reply(200, app.diagnostics())
             if path == '/camera.jpg':
                 with app.lock:
                     frame = app.frame

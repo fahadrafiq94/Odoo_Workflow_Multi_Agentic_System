@@ -8,17 +8,17 @@ const set=(id,value)=>$(id).textContent=value;
 function render(s){
  state=s;token=s.token;set('mode',s.mode==='live'?'LIVE · ODOO':s.mode==='demo'?'DEMO · SIMULATED':'CONNECTING');
  set('connection',s.connected?'Main system connected':'Main system offline');$('connection').classList.toggle('online',s.connected);
- set('reward',s.reward||'');$('reward').hidden=!s.reward;set('customer-message',s.message);set('error',s.error||actionError);$('error').hidden=!(s.error||actionError);
+ set('reward',s.reward||'');$('reward').hidden=!s.reward;set('customer-message',s.message);set('error',s.error||s.connection_error||s.processing_error||actionError);$('error').hidden=!(s.error||s.connection_error||s.processing_error||actionError);
  set('request-state',s.busy?'WITH THE AGENT TEAM':s.terminal?'REQUEST FINISHED':s.submitting?'SENDING YOUR REQUEST':s.mission_id?'WITH THE AGENT TEAM':s.armed?'READY FOR YOUR SMILE':'WAITING FOR YOUR SMILE');
  set('mission-id',s.mission_id||'');set('camera-button',s.camera_running?'Stop camera':'Start camera');
  $('arm').disabled=!s.can_arm||s.armed;set('arm',s.armed?'Waiting for your smile…':'Next customer →');
  $('simulate').hidden=!s.demo_camera||s.mode!=='demo';$('simulate').disabled=!s.armed;
- $('retry').hidden=!s.request_id||s.terminal||!s.error;$('retry').disabled=s.submitting||!s.connected;
+ $('retry').hidden=!s.can_retry;$('retry').disabled=s.submitting||!s.connected;
  set('camera-status',s.camera_status);set('camera-tag',s.demo_camera&&s.camera_running?'SIMULATED CAMERA':s.camera_running?'CAMERA ON':'CAMERA OFF');
  set('camera-title',s.demo_camera&&s.camera_running?'Try the experience.':s.camera_running?'Looking for your smile.':'Ready when you are.');
  set('camera-description',s.demo_camera?'Simulated camera. No webcam access.':'Start the camera to enable one smile request.');
  if(!s.camera_running){$('camera').hidden=true;$('camera-placeholder').hidden=false;}
- set('smile-value',Math.round(s.score*100)+'%');$('smile-fill').style.width=(Math.round(s.score*100))+'%';
+ set('smile-value',(s.score*100).toFixed(1)+'%');$('smile-fill').style.width=(Math.round(s.score*100))+'%';
  set('smile-instruction',s.trigger_status);
  set('agent',names[s.activity.agent]||'The agent team');set('agent-avatar',(names[s.activity.agent]||'S').slice(0,2).toUpperCase());
  set('action',words(s.activity.action));set('activity-message',s.activity.message||'The main system coordinates sales, stock and purchasing.');

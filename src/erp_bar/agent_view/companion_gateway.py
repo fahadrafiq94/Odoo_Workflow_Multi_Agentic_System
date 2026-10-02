@@ -7,6 +7,9 @@ import secrets
 import sqlite3
 import threading
 from urllib.parse import urlsplit, parse_qs
+from uuid import uuid4
+
+BUILD = '2026.10.02.2'
 
 ACTIONS = {
     'search_product': ('product.product', 'product_id'),
@@ -54,6 +57,7 @@ class CompanionGateway:
         if not product.strip() or len(product) > 120:
             raise ValueError('Choose a valid smile product name.')
         self.session, self.token, self.product = session, token, product.strip()
+        self.instance_id = uuid4().hex[:12]
         self.lock = threading.RLock()
         self.ledger = Path(ledger_path)
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +99,8 @@ class CompanionGateway:
             if candidate:
                 target = candidate
                 targets.append(candidate)
-        return {'mode': data['mode'], 'busy': data['busy'], 'mission_id': data['mission_id'],
+        return {'service': 'ERP_BAR companion gateway', 'build': BUILD, 'instance_id': self.instance_id,
+                'mode': data['mode'], 'busy': data['busy'], 'mission_id': data['mission_id'],
                 'last_id': data['last_id'], 'events': [e for e in data['events'] if e['kind'] in {'mission_start','mission_end','tool_start','tool_end','instruction','agent_end','handoff'}],
                 'odoo_target': target, 'odoo_targets': targets,
                 'smile_product': self.product, 'smile_quantity': 1,

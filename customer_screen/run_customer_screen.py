@@ -5,6 +5,7 @@ from pathlib import Path
 import webbrowser
 from erp_bar_customer.app import CustomerApp
 from erp_bar_customer.server import make_server
+from erp_bar_customer.diagnostics import BUILD
 
 
 def main():
@@ -19,11 +20,13 @@ def main():
     pairing = Path(args.pairing).resolve()
     if not pairing.is_file():
         parser.error('Copy companion_pairing.json from the main ERP_BAR computer first.')
-    app = CustomerApp(json.loads(pairing.read_text()), Path(__file__).resolve().parent / 'customer_state', demo_camera=args.demo_camera)
-    app.start()
+    app = CustomerApp(json.loads(pairing.read_text(encoding='utf-8-sig')), Path(__file__).resolve().parent / 'customer_state', demo_camera=args.demo_camera)
     server = make_server(app, args.port)
+    app.start()
     url = f'http://127.0.0.1:{args.port}'
     print(f'ERP_BAR customer screen: {url}')
+    print(f'Build {BUILD} · pairing: {pairing}')
+    print(f'Main system: {app.brain.url} · Odoo: {app.config.get("odoo_url") or "NOT CONFIGURED"}')
     print('Start camera and hold a smile at 75% or above. Odoo opens automatically for live missions and closes when they finish. Use Next customer to re-arm.')
     if not args.no_browser:
         webbrowser.open(url)
