@@ -85,7 +85,12 @@ class CompanionGateway:
     def snapshot(self):
         data = self.session.snapshot()
         known, target, targets = {}, None, []
+        product_name = None
         for event in data['events']:
+            if event.get('kind') == 'tool_end' and event.get('ok') and event.get('action') in ('search_product', 'create_product'):
+                name = event.get('result', {}).get('product_name')
+                if isinstance(name, str) and name.strip():
+                    product_name = name
             candidate = display_target(event, known)
             if candidate:
                 target = candidate
@@ -93,7 +98,8 @@ class CompanionGateway:
         return {'mode': data['mode'], 'busy': data['busy'], 'mission_id': data['mission_id'],
                 'last_id': data['last_id'], 'events': [e for e in data['events'] if e['kind'] in {'mission_start','mission_end','tool_start','tool_end','instruction','agent_end','handoff'}],
                 'odoo_target': target, 'odoo_targets': targets,
-                'smile_product': self.product, 'smile_quantity': 1}
+                'smile_product': self.product, 'smile_quantity': 1,
+                'verified_product_name': product_name}
 
 
 def make_companion_server(gateway, host='127.0.0.1', port=8766):

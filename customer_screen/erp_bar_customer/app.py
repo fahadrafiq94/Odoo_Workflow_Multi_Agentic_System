@@ -67,11 +67,14 @@ class CustomerApp:
         self.connected = False
         self.last_poll = 0
         self.remote = {}
-        self.message = 'Start a mission with the button, or start the camera and smile.'
+        self.message = 'Start the camera and hold your smile to begin.'
         self.error = ''
         self.pending_file = self.root / 'pending_request.json'
         self.pending = json.loads(self.pending_file.read_text()) if self.pending_file.exists() else None
         self.submitting = False
+        self.awaiting_initial_arm = False
+        self.auto_display_mission = None
+        self.finished_display_mission = None
         self.odoo = OdooDisplay(config.get('odoo_url', ''), self.root / 'odoo_browser_profile', config.get('browser_channel', 'chromium'), hold_seconds=config.get('display_hold_seconds', 1.2))
         self.screen_url = None
         if self.pending:
@@ -92,6 +95,8 @@ class CustomerApp:
             self.last_poll = time.monotonic()
             if remote.get("busy"):
                 self.gate.disarm()
+            elif self.awaiting_initial_arm and self.camera_running and self.eligible():
+                self.arm()
             if self.pending and self.pending.get('mission_id'):
                 if self.pending['mission_id'] == remote.get('mission_id'):
                     final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
@@ -104,7 +109,18 @@ class CustomerApp:
                     self.message = 'This request is no longer in the main system’s current view. Ask staff to check its mission ID before another order.'
             # A demo event must never navigate a real Odoo browser to simulated record IDs.
             if remote.get('mode') == 'live':
+                mission_id = remote.get('mission_id')
+                final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
+                if mission_id and remote.get('busy') and not final and mission_id != self.auto_display_mission:
+                    self.auto_display_mission = mission_id
+                    try:
+                        self.odoo.open(split_url=self.screen_url, auto_follow=True)
+                    except ValueError as exc:
+                        self.odoo.status = str(exc)
                 self.odoo.update_many(remote.get('odoo_targets') or ([remote['odoo_target']] if remote.get('odoo_target') else []), remote.get('mission_id'))
+                if final and mission_id != self.finished_display_mission:
+                    self.finished_display_mission = mission_id
+                    self.odoo.close_window()
             else:
                 self.odoo.follow(False)
 
@@ -131,14 +147,16 @@ class CustomerApp:
             self.pending = None
             self.persist()
             self.gate.arm()
+            self.awaiting_initial_arm = False
             self.error = ''
-            self.message = 'Look at the camera with a relaxed face, then smile.'
+            self.message = 'Hold a smile at 75% or above for a moment.'
 
     def request_one(self, source='button'):
         with self.lock:
             if not self.eligible():
                 raise ValueError('Wait for the current request or reconnect to the main system.')
             self.gate.disarm()
+            self.awaiting_initial_arm = False
             self.pending = {'request_id': uuid4().hex, 'mission_id': None, 'terminal': False, 'source': source}
             try:
                 self.persist()
@@ -160,6 +178,7 @@ class CustomerApp:
     def camera_ready(self):
         with self.lock:
             self.camera_running = True
+            self.awaiting_initial_arm = True
             # Starting the camera arms exactly one customer if the workflow is ready.
             if self.eligible():
                 self.arm()
@@ -272,7 +291,35 @@ class CustomerApp:
             elif watching_other and observed_final:
                 message = observed_final.get('customer_message') or observed_final.get('message') or 'Mission finished.'
             latest = next((e for e in reversed(remote.get('events', [])) if e['kind'] in ('tool_start','tool_end','instruction','agent_end')), {})
+            reward = ''
+            if self.pending and self.pending.get('source') == 'smile' and (
+                    not self.pending.get('mission_id') or self.pending.get('mission_id') == remote.get('mission_id')):
+                same_mission = self.pending.get('mission_id') == remote.get('mission_id')
+                verified = remote.get('verified_product_name') if same_mission else None
+                reward = 'You won a ' + verified + '!' if verified else 'Smile registered! Checking your reward…'
+                if remote.get('mode') == 'demo':
+                    reward = 'Demo: You won a ' + remote.get('smile_product', 'Lemonade') + '!'
+                if self.pending.get('terminal') and observed_final and observed_final.get('status') == 'FAILED':
+                    reward = 'Smile registered — please ask staff about your reward.'
+            cooldown = max(0, self.gate.cooldown - (time.monotonic() - self.gate.last_trigger))
+            if not self.camera_running:
+                trigger_status = 'Start the camera to begin.'
+            elif not self.connected:
+                trigger_status = 'Waiting for Computer A to connect.'
+            elif remote.get('busy') or self.submitting:
+                trigger_status = 'The agents are handling the current request.'
+            elif not self.eligible():
+                trigger_status = 'Waiting for confirmation of the previous request. Retry the same request if needed.'
+            elif not self.gate.armed:
+                trigger_status = 'Select Next customer to enable another smile.'
+            elif cooldown > 0:
+                trigger_status = f'Ready in {int(cooldown) + 1} seconds.'
+            elif self.gate.since is not None:
+                trigger_status = 'Smile detected — keep holding…'
+            else:
+                trigger_status = 'Ready! Hold your smile at 75% or above for 0.6 seconds.'
             return {'token': self.token, 'connected': self.connected, 'mode': remote.get('mode', 'unknown'),
+                    'reward': reward, 'trigger_status': trigger_status,
                     'product': remote.get('smile_product', 'Lemonade'), 'busy': remote.get('busy', False),
                     'camera_running': self.camera_running, 'camera_status': self.camera_status,
                     'score': round(self.gate.score, 3), 'armed': self.gate.armed, 'neutral_seen': self.gate.neutral_seen,

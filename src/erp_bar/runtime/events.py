@@ -107,6 +107,9 @@ def public_result(result):
             summary.update({k: v for k, v in value[key].items() if k in allowed and isinstance(v, (str, int, float, bool, type(None)))})
     if isinstance(value.get("vendors"), list):
         summary["supplier_count"] = len(value["vendors"])
+    product = value.get("product")
+    if isinstance(product, dict) and isinstance(product.get("name"), str):
+        summary["product_name"] = product["name"]
     return summary
 
 

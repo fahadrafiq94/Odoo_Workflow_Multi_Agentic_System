@@ -24,7 +24,7 @@ def main():
     server = make_server(app, args.port)
     url = f'http://127.0.0.1:{args.port}'
     print(f'ERP_BAR customer screen: {url}')
-    print('Select Open split screen to place camera and Odoo side by side. Start camera to arm one smile request, or use Start live mission.')
+    print('Start camera and hold a smile at 75% or above. Odoo opens automatically for live missions and closes when they finish. Use Next customer to re-arm.')
     if not args.no_browser:
         webbrowser.open(url)
     try:

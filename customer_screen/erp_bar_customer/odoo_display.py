@@ -67,12 +67,18 @@ class OdooDisplay:
         self.layout_status = 'Open split screen to arrange both windows'
         self.thread = None
         self.stop = threading.Event()
+        self.window_requested = False
+        self.auto_follow = False
 
-    def open(self, split_url=None):
+    def open(self, split_url=None, auto_follow=False):
         if not self.base:
             raise ValueError('Set odoo_url in the pairing file first.')
         record_url(self.base, {'model': 'sale.order'})
         with self.lock:
+            self.window_requested = True
+            self.auto_follow = auto_follow
+            if auto_follow:
+                self.following = True
             if split_url:
                 url = urlsplit(split_url)
                 if url.scheme != 'http' or url.hostname not in ('127.0.0.1', 'localhost') or url.username or url.password or url.path not in ('', '/') or url.query or url.fragment:
@@ -83,6 +89,14 @@ class OdooDisplay:
                 return
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
+
+    def close_window(self):
+        """Close only our Odoo window; keep the camera window and login profile."""
+        with self.lock:
+            self.window_requested = False
+            self.following = False
+            self.auto_follow = False
+            self.pending.clear()
 
     def follow(self, enabled):
         with self.lock:
@@ -133,7 +147,7 @@ class OdooDisplay:
 
     def run(self):
         self.status = 'Opening browser'
-        camera_context = None
+        camera_context = context = page = None
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as pw:
@@ -141,24 +155,37 @@ class OdooDisplay:
                            'args': ['--window-size=960,900']}
                 if self.channel != 'chromium':
                     options['channel'] = self.channel
-                context = pw.chromium.launch_persistent_context(str(self.profile), **options)
                 try:
-                    page = context.pages[0] if context.pages else context.new_page()
-                    page.goto(self.base.rstrip('/') + '/web', wait_until='domcontentloaded', timeout=30000)
-                    self.available = True
-                    self.status = 'Sign in to Odoo, then enable Follow Odoo'
                     next_change = 0
                     while not self.stop.wait(.1):
+                        if not self.window_requested:
+                            if context is not None:
+                                context.close()
+                                context = page = None
+                                self.available = False
+                                self.status = 'Mission finished · Odoo closed'
+                            continue
+                        if context is None:
+                            context = pw.chromium.launch_persistent_context(str(self.profile), **options)
+                            page = context.pages[0] if context.pages else context.new_page()
+                            page.goto(self.base.rstrip('/') + '/web', wait_until='domcontentloaded', timeout=30000)
+                            self.available = True
+                            self.status = 'Odoo opened · sign in if requested'
+                            next_change = 0
                         if page.is_closed():
-                            break
+                            self.close_window()
+                            continue
                         if self.layout_requested:
                             self.layout_requested = False
                             try:
                                 if camera_context is None:
                                     camera_profile = self.profile.parent / 'camera_browser_profile'
                                     camera_context = pw.chromium.launch_persistent_context(str(camera_profile), **options)
-                                camera_page = camera_context.pages[0] if camera_context.pages else camera_context.new_page()
-                                camera_page.goto(self.split_url, wait_until='domcontentloaded', timeout=15000)
+                                camera_page = next((p for p in camera_context.pages if not p.is_closed()), None)
+                                if camera_page is None:
+                                    camera_page = camera_context.new_page()
+                                if camera_page.url != self.split_url:
+                                    camera_page.goto(self.split_url, wait_until='domcontentloaded', timeout=15000)
                                 screen = camera_page.evaluate('({left:screen.availLeft||0,top:screen.availTop||0,width:screen.availWidth,height:screen.availHeight})')
                                 left, right = split_bounds(screen)
                                 place_window(camera_context, camera_page, left)
@@ -168,13 +195,14 @@ class OdooDisplay:
                                 self.layout_status = 'Automatic placement unavailable. Snap camera left and Odoo right; following still works.'
                         if not self.following or time.monotonic() < next_change:
                             continue
+                        # Keep queued views during manual login. Auto-follow resumes
+                        # when login finishes, without another button click.
+                        if '/web/login' in page.url or '/web/database/' in page.url:
+                            self.status = 'Sign in to Odoo; following resumes automatically'
+                            continue
                         with self.lock:
                             target = self.pending.popleft() if self.pending else None
                         if not target:
-                            continue
-                        if '/web/login' in page.url or '/web/database/' in page.url:
-                            self.follow(False)
-                            self.status = 'Complete sign-in, then enable Follow Odoo again'
                             continue
                         try:
                             url = record_url(self.base, target)
@@ -186,8 +214,9 @@ class OdooDisplay:
                             else:
                                 page.goto(url, wait_until='domcontentloaded', timeout=20000)
                             if '/web/login' in page.url or '/web/database/' in page.url:
-                                self.follow(False)
-                                self.status = 'Sign in to the correct database, then enable Follow Odoo again'
+                                with self.lock:
+                                    self.pending.appendleft(target)
+                                self.status = 'Sign in to Odoo; following resumes automatically'
                                 continue
                             with self.lock:
                                 self.shown = target
@@ -200,7 +229,8 @@ class OdooDisplay:
                 finally:
                     if camera_context:
                         camera_context.close()
-                    context.close()
+                    if context:
+                        context.close()
         except Exception as exc:
             self.status = 'Browser unavailable: ' + type(exc).__name__ + '. Check browser installation, login and Odoo URL.'
         finally:

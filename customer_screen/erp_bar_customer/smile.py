@@ -36,8 +36,10 @@ class SmileGate:
         self.score = sum(self.scores) / len(self.scores)
         if self.score < .4:
             self.neutral_seen = True
-        ready = (self.armed and eligible and self.neutral_seen and len(self.scores) == self.scores.maxlen
-                 and now - self.last_trigger >= self.cooldown and self.score > self.threshold)
+        # A held smile can be the first expression after arming. One-shot arming
+        # and the cooldown prevent repeated requests without a hidden neutral gate.
+        ready = (self.armed and eligible and len(self.scores) == self.scores.maxlen
+                 and now - self.last_trigger >= self.cooldown and self.score >= self.threshold)
         if not ready:
             self.since = None
             return False

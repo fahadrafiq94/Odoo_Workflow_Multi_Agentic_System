@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+customer_state/
+companion_pairing.json
+face_landmarker.task
