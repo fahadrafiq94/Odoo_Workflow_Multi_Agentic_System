@@ -1,56 +1,24 @@
-"""Local camera client, paired request transport and customer state."""
+"""Automatic camera kiosk, durable requests and an authenticated mission stream."""
 import json
 from pathlib import Path
+import queue
 import secrets
 import threading
 import time
-import urllib.error
-import urllib.request
-from urllib.parse import urlsplit
-import ipaddress
 from collections import deque
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from .smile import SmileGate, smile_score
 from .odoo_display import OdooDisplay
-from .diagnostics import BUILD, error_text
+from .diagnostics import BUILD, PROTOCOL, error_text
+from .transport import BrainClient, NoRedirect, RequestRejected
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        raise ValueError('The paired endpoint must not redirect.')
-
-
-class BrainClient:
-    def __init__(self, config):
-        self.url = config['brain_url'].rstrip('/')
-        parsed = urlsplit(self.url)
-        if parsed.scheme not in ('http', 'https') or parsed.path not in ('', '/') or parsed.query or parsed.fragment or parsed.username or parsed.password:
-            raise ValueError('brain_url must be a private HTTP(S) host and port.')
-        host = parsed.hostname
-        if host != 'localhost':
-            address = ipaddress.ip_address(host)
-            if not address.is_private or address.is_unspecified or address.is_multicast:
-                raise ValueError('Use a private network or localhost pairing address.')
-        self.token = config['token']
-        if not isinstance(self.token, str) or len(self.token) < 32:
-            raise ValueError('Invalid pairing token.')
-        self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-
-    def call(self, path, data=None):
-        request = urllib.request.Request(self.url + path,
-            data=json.dumps(data).encode() if data is not None else None,
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'})
-        try:
-            with self.http.open(request, timeout=4) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as exc:
-            try:
-                message = json.load(exc).get('error', 'Request rejected.')
-            except Exception:
-                message = 'Request rejected.'
-            raise RuntimeError(message) from None
+def save_json(path, value):
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value, indent=2), encoding='utf-8')
+    temporary.replace(path)
 
 
 class CustomerApp:
@@ -64,32 +32,38 @@ class CustomerApp:
         self.gate = SmileGate()
         self.frame = None
         self.camera_running = False
-        self.camera_status = 'Camera off'
+        self.camera_status = 'Starting camera'
         self.camera_thread = None
         self.demo_camera = demo_camera
         self.connected = False
-        self.last_poll = 0
+        self.last_poll = 0.
         self.remote = {}
-        self.message = 'Start the camera and hold your smile to begin.'
-        self.error = ''
-        self.connection_error = ''
-        self.processing_error = ''
+        self.message = 'Connecting to the agent team.'
+        self.error = self.connection_error = self.processing_error = ''
         self.trace = deque(maxlen=30)
         self.pending_file = self.root / 'pending_request.json'
         self.pending = json.loads(self.pending_file.read_text()) if self.pending_file.exists() else None
+        self.stream_file = self.root / 'stream_checkpoint.json'
+        checkpoint = json.loads(self.stream_file.read_text()) if self.stream_file.exists() else {}
+        self.stream_cursor = int(checkpoint.get('cursor', 0))
+        self.stream_instance = checkpoint.get('instance_id')
+        self.replayed_events = 0
         self.submitting = False
+        self.recovering = False
         self.awaiting_initial_arm = False
-        self.auto_display_mission = None
-        self.finished_display_mission = None
+        self.needs_new_expression = bool(self.pending)
+        self.reset_since = None
+        self.auto_display_mission = self.finished_display_mission = None
         self.display_attempt_mission = None
         self.display_attempts = 0
-        self.next_display_attempt = 0
-        self.odoo = OdooDisplay(config.get('odoo_url', ''), self.root / 'odoo_browser_profile', config.get('browser_channel', 'chromium'), hold_seconds=config.get('display_hold_seconds', 1.2))
+        self.next_display_attempt = 0.
+        self.ack_queue = queue.Queue()
+        self.odoo = OdooDisplay(config.get('odoo_url', ''), self.root / 'odoo_browser_profile',
+            config.get('browser_channel', 'chromium'), hold_seconds=config.get('display_hold_seconds', 1.2),
+            on_ready=self.queue_view_ready)
         self.screen_url = None
-        if self.pending:
-            self.message = self.pending.get('message') or 'Restored request. Reconnecting to the main system.'
-            if not self.pending.get('terminal') and not self.pending.get('mission_id'):
-                self.error = 'A saved request has no acknowledgement. Use Retry the same request to check it safely.'
+        if self.pending and not self.pending.get('terminal'):
+            self.message = 'Checking the saved request with the agent team.'
 
     def record(self, stage, detail=''):
         self.trace.append({'time': datetime.now(timezone.utc).isoformat(), 'stage': stage, 'detail': detail})
@@ -98,57 +72,123 @@ class CustomerApp:
         return error_text(exc, (self.config.get('token'), self.token))
 
     def persist(self):
-        temporary = self.pending_file.with_suffix('.tmp')
-        temporary.write_text(json.dumps(self.pending, indent=2))
-        temporary.replace(self.pending_file)
+        save_json(self.pending_file, self.pending)
 
-    def start(self):
-        threading.Thread(target=self.poll, daemon=True).start()
+    def start(self, auto_camera=True):
+        threading.Thread(target=self.stream_loop, daemon=True).start()
+        threading.Thread(target=self.ack_loop, daemon=True).start()
+        if auto_camera:
+            self.camera_start()
+
+    def stream_loop(self):
+        while not self.stop.is_set():
+            try:
+                first_state = True
+                for kind, payload, cursor in self.brain.events(self.stream_cursor):
+                    if self.stop.is_set():
+                        break
+                    with self.lock:
+                        if kind == 'replay':
+                            # Replay is history only; do not reopen a finished order.
+                            self.replayed_events += len(payload.get('events', []))
+                        elif kind == 'heartbeat':
+                            if payload.get('instance_id') == self.stream_instance and self.connected:
+                                self.last_poll = time.monotonic()
+                        elif kind == 'state':
+                            if payload.get('protocol') != PROTOCOL:
+                                raise ValueError('Update both computers to protocol 2 before starting a mission.')
+                            self.processing_error = ''
+                            self.ingest(payload)
+                            self.stream_cursor = cursor if cursor is not None else payload.get('stream_id', 0)
+                            self.stream_instance = payload['instance_id']
+                            save_json(self.stream_file, {'cursor': self.stream_cursor, 'instance_id': self.stream_instance})
+                            if first_state:
+                                self.record('stream_connected', self.stream_instance)
+                                self.recover_pending()
+                                first_state = False
+                    # A heartbeat also lets a failed browser launch retry, without
+                    # polling A or waiting for the next business operation.
+                    if kind == 'heartbeat':
+                        self.sync_display()
+            except Exception as exc:
+                with self.lock:
+                    detail = self.describe_error(exc)
+                    if detail != self.connection_error:
+                        self.record('stream_disconnected', detail)
+                    self.connection_error = detail
+                    self.connected = False
+                    self.gate.since = None
+            self.stop.wait(1)
+
+    def poll_once(self):
+        """Read-only diagnostic compatibility; normal operation uses stream_loop."""
+        try:
+            remote = self.brain.call('/v1/state')
+            if not isinstance(remote, dict) or remote.get('mode') not in ('demo', 'live') or not isinstance(remote.get('events'), list):
+                raise ValueError('Expected the paired workflow API on port 8766.')
+            self.ingest(remote)
+        except Exception as exc:
+            with self.lock:
+                self.connected = False
+                self.connection_error = self.describe_error(exc)
 
     def ingest(self, remote):
         with self.lock:
+            was_busy = self.remote.get('busy', False)
             self.remote = remote
             self.connected = True
             self.connection_error = ''
             self.last_poll = time.monotonic()
-            if remote.get("busy"):
+            if remote.get('busy'):
                 self.gate.disarm()
-            elif self.awaiting_initial_arm and self.camera_running and self.eligible():
+                self.gate.score = 0
+                self.needs_new_expression = True
+                self.reset_since = None
+            elif was_busy:
+                self.reset_since = None
+            final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
+            if self.pending and self.pending.get('mission_id') == remote.get('mission_id') and final:
+                if not self.pending.get('terminal'):
+                    self.finish_pending(final)
+            if self.awaiting_initial_arm and self.camera_running and self.eligible() and not self.needs_new_expression:
                 self.arm()
-            if self.pending and self.pending.get('mission_id'):
-                if self.pending['mission_id'] == remote.get('mission_id'):
-                    final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
-                    if final and not self.pending.get('terminal'):
-                        self.pending['terminal'] = True
-                        self.pending['message'] = final.get('customer_message') or final.get('message') or 'Request completed. Please ask staff for the result.'
-                        self.message = self.pending['message']
-                        self.persist()
-                elif not self.pending.get('terminal'):
-                    self.message = 'This request is no longer in the main system’s current view. Ask staff to check its mission ID before another order.'
-            # A demo event must never navigate a real Odoo browser to simulated record IDs.
-            if remote.get('mode') == 'live':
-                mission_id = remote.get('mission_id')
-                final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
-                if mission_id and remote.get('busy') and not final and (
-                        mission_id != self.auto_display_mission or self.odoo.launch_failed is True):
-                    self.try_open_odoo(mission_id)
-                try:
-                    self.odoo.update_many(remote.get('odoo_targets') or ([remote['odoo_target']] if remote.get('odoo_target') else []), remote.get('mission_id'))
-                except Exception as exc:
-                    self.odoo.status = 'Odoo display update failed: ' + self.describe_error(exc)
-                if final and mission_id != self.finished_display_mission:
-                    self.finished_display_mission = mission_id
-                    if mission_id != self.auto_display_mission and self.display_attempt_mission != mission_id:
-                        self.odoo.status = 'Mission already finished before B observed it running. Check the outcome on A.'
-                    self.odoo.close_window()
-            else:
-                self.odoo.follow(False)
+            self.sync_display()
 
-    def try_open_odoo(self, mission_id):
-        if mission_id != self.display_attempt_mission:
-            self.display_attempt_mission = mission_id
-            self.display_attempts = 0
-            self.next_display_attempt = 0
+    def finish_pending(self, final):
+        self.pending['terminal'] = True
+        self.pending['final_status'] = final.get('status')
+        self.pending['message'] = final.get('customer_message') or final.get('message') or 'Your order is completed.'
+        self.message = self.pending['message']
+        self.error = ''
+        self.needs_new_expression = True
+        self.reset_since = None
+        self.persist()
+
+    def sync_display(self):
+        with self.lock:
+            remote = self.remote
+            if remote.get('mode') != 'live':
+                self.odoo.follow(False)
+                return
+            mission = remote.get('mission_id')
+            final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
+            try:
+                # Identity is set before the browser worker can acknowledge startup.
+                self.odoo.update_many(remote.get('odoo_targets') or ([remote['odoo_target']] if remote.get('odoo_target') else []), mission)
+                if mission and remote.get('busy') and not final and (
+                        mission != self.auto_display_mission or self.odoo.launch_failed is True):
+                    self.try_open_odoo(mission)
+                if final and mission != self.finished_display_mission:
+                    self.finished_display_mission = mission
+                    if mission != self.auto_display_mission and self.display_attempt_mission != mission:
+                        self.odoo.status = 'Mission already finished before the customer view opened. Check its outcome on A.'
+                    self.odoo.close_window()
+            except Exception as exc:
+                self.odoo.status = 'Odoo display error: ' + self.describe_error(exc)
+
+    def try_open_odoo(self, mission):
+        if mission != self.display_attempt_mission:
+            self.display_attempt_mission, self.display_attempts, self.next_display_attempt = mission, 0, 0
         if self.display_attempts >= 3 or time.monotonic() < self.next_display_attempt:
             return
         self.display_attempts += 1
@@ -159,77 +199,84 @@ class CustomerApp:
             self.odoo.status = 'Cannot open Odoo: ' + self.describe_error(exc)
             self.record('odoo_open_failed', self.odoo.status)
         else:
-            self.auto_display_mission = mission_id
-            self.record('odoo_open_requested', mission_id)
+            self.auto_display_mission = mission
+            self.record('odoo_open_requested', mission)
 
-    def poll_once(self):
-        try:
-            remote = self.brain.call('/v1/state')
-            if not isinstance(remote, dict) or remote.get('mode') not in ('demo', 'live') or not isinstance(remote.get('events'), list):
-                raise ValueError('The paired endpoint did not return ERP_BAR workflow state. Check brain_url and port 8766.')
-        except Exception as exc:
-            with self.lock:
-                self.connected = False
-                detail = self.describe_error(exc)
-                if detail != self.connection_error:
-                    self.record('connection_failed', detail)
-                self.connection_error = detail
-            return
-        with self.lock:
-            if not self.connected:
-                self.record('connected', remote.get('mode', 'unknown'))
-            self.processing_error = ''
-            try:
-                self.ingest(remote)
-            except Exception as exc:
-                # HTTP succeeded: local processing/display errors are separate.
-                self.processing_error = self.describe_error(exc)
-                self.record('state_processing_failed', self.processing_error)
+    def queue_view_ready(self, mission, event_id):
+        self.ack_queue.put({'mission_id': mission, 'event_id': event_id})
 
-    def poll(self):
+    def ack_loop(self):
         while not self.stop.is_set():
-            self.poll_once()
-            self.stop.wait(.6)
+            try:
+                data = self.ack_queue.get(timeout=.25)
+            except queue.Empty:
+                continue
+            try:
+                self.brain.call('/v1/view-ready', data)
+                with self.lock:
+                    self.record('view_ready', str(data['event_id']))
+            except Exception as exc:
+                with self.lock:
+                    self.record('view_ack_failed', self.describe_error(exc))
 
     def eligible(self):
-        return (self.connected and time.monotonic() - self.last_poll < 3 and
-                not self.processing_error and
-                not self.remote.get('busy') and not self.submitting and
-                (not self.pending or self.pending.get('terminal')))
+        return (self.connected and time.monotonic() - self.last_poll < 4 and not self.processing_error
+                and self.remote.get('protocol') == PROTOCOL and self.remote.get('product_ready') is True
+                and not self.remote.get('busy') and not self.submitting and not self.recovering
+                and (not self.pending or self.pending.get('terminal')))
 
     def arm(self):
         with self.lock:
             if not self.camera_running:
-                raise ValueError('Start the camera first.')
+                raise ValueError('Camera is not running. Check camera permissions and the model file.')
             if not self.eligible():
-                raise ValueError('Wait for the current request or reconnect to the main system.')
+                raise ValueError('Wait for A to be ready and the current request to finish.')
             self.pending = None
             self.persist()
             self.gate.arm()
             self.record('camera_armed')
             self.awaiting_initial_arm = False
+            self.needs_new_expression = False
+            self.reset_since = None
             self.error = ''
-            self.message = 'Hold a smile at 75% or above for a moment.'
+            self.message = 'Hold your smile at 75% or above for a moment.'
 
-    def request_one(self, source='button'):
+    def request_one(self, source='smile'):
         with self.lock:
             if not self.eligible():
-                raise ValueError('Wait for the current request or reconnect to the main system.')
+                raise ValueError('The agent team is not ready for a new customer.')
             self.gate.disarm()
             self.awaiting_initial_arm = False
+            self.needs_new_expression = True
+            self.reset_since = None
             self.pending = {'request_id': uuid4().hex, 'mission_id': None, 'terminal': False, 'source': source}
             try:
                 self.persist()
-            except Exception:
-                self.error = 'Cannot save the request identifier. No request was sent.'
+            except Exception as exc:
+                self.error = 'Cannot save request. Nothing was sent. ' + self.describe_error(exc)
                 raise ValueError(self.error) from None
             self.error = ''
-            self.message = ('Smile recognised. ' if source == 'smile' else '') + 'Requesting one ' + self.remote.get('smile_product', 'Lemonade') + '.'
+            self.message = 'Smile detected. Sending your request…'
             self.record('request_saved', self.pending['request_id'])
             self.send_pending()
 
     def score(self, score, now=None):
+        now = time.monotonic() if now is None else now
         with self.lock:
+            if self.remote.get('busy') or self.submitting:
+                # Preview stays on, but smiles during a mission are never queued.
+                self.gate.disarm()
+                self.gate.score = 0
+                self.reset_since = None
+                return
+            if not self.gate.armed and self.eligible() and self.needs_new_expression:
+                if score is None or score < .4:
+                    if self.reset_since is None:
+                        self.reset_since = now
+                    if now - self.reset_since >= 1.2 and now - self.gate.last_trigger >= self.gate.cooldown:
+                        self.arm()
+                else:
+                    self.reset_since = None
             if self.gate.update(score, now, eligible=self.eligible()):
                 self.record('smile_registered')
                 try:
@@ -241,8 +288,7 @@ class CustomerApp:
         with self.lock:
             self.camera_running = True
             self.awaiting_initial_arm = True
-            # Starting the camera arms exactly one customer if the workflow is ready.
-            if self.eligible():
+            if self.eligible() and not self.needs_new_expression:
                 self.arm()
 
     def open_split(self):
@@ -250,11 +296,53 @@ class CustomerApp:
             raise ValueError('The local camera screen is not ready.')
         self.odoo.open(split_url=self.screen_url)
 
+    def apply_reply(self, result, request_id):
+        with self.lock:
+            if not self.pending or self.pending['request_id'] != request_id:
+                return
+            if result.get('state') in ('not_found', 'uncertain'):
+                self.error = 'The saved request is not confirmed. Retry the same request or ask staff to check A.'
+                self.record('request_unconfirmed', result['state'])
+                return
+            if not result.get('mission_id'):
+                raise ValueError('A did not return a mission ID.')
+            self.pending.update(mission_id=result['mission_id'], product=result['product'], product_info=result.get('product_info'))
+            self.message = 'Your order is being prepared.'
+            self.error = ''
+            self.record('request_accepted', result['mission_id'])
+            if result.get('final'):
+                self.finish_pending(result['final'])
+            else:
+                self.persist()
+                # A very fast mission may have finished in the SSE stream before
+                # the POST response arrived. Reconcile with that same mission.
+                if self.remote.get('mission_id') == result['mission_id']:
+                    final = next((e for e in reversed(self.remote.get('events', [])) if e['kind'] == 'mission_end'), None)
+                    if final:
+                        self.finish_pending(final)
+
+    def recover_pending(self):
+        with self.lock:
+            if not self.pending or self.pending.get('terminal') or self.submitting or self.recovering:
+                return
+            self.recovering = True
+            request_id = self.pending['request_id']
+        def recover():
+            try:
+                self.apply_reply(self.brain.call('/v1/requests/' + request_id), request_id)
+            except Exception as exc:
+                with self.lock:
+                    self.error = 'Could not check the saved request. Retry the same request.'
+                    self.record('recovery_failed', self.describe_error(exc))
+            finally:
+                with self.lock:
+                    self.recovering = False
+        threading.Thread(target=recover, daemon=True).start()
+
     def send_pending(self):
         with self.lock:
             if not self.pending or self.pending.get('terminal') or self.submitting:
                 return
-            # Retry never transmits a new ID unless its local persistence worked.
             try:
                 self.persist()
             except Exception as exc:
@@ -265,18 +353,19 @@ class CustomerApp:
             self.record('request_sending', request_id)
         def send():
             try:
-                result = self.brain.call('/v1/smile', {'request_id': request_id})
+                self.apply_reply(self.brain.call('/v1/smile', {'request_id': request_id}), request_id)
+            except RequestRejected as exc:
                 with self.lock:
-                    self.pending['mission_id'] = result['mission_id']
-                    self.record('request_accepted', result['mission_id'])
-                    self.message = 'The agents are preparing your request for one ' + result['product'] + '.'
-                    self.error = ''
+                    # A explicitly says no mission was accepted. Do not queue it.
+                    self.pending.update(terminal=True, final_status='REJECTED', message=str(exc))
+                    self.message, self.error = str(exc), ''
+                    self.record('request_rejected', exc.code)
                     self.persist()
             except Exception as exc:
                 with self.lock:
-                    self.record('request_unconfirmed', self.describe_error(exc))
-                    self.error = 'Request not yet confirmed. Retry this same request; do not start another customer.'
-                    self.message = self.describe_error(exc) + ' The request may already have started.'
+                    self.error = 'Request not confirmed. Retry this same request; do not start another customer.'
+                    self.message = self.describe_error(exc)
+                    self.record('request_unconfirmed', self.message)
             finally:
                 with self.lock:
                     self.submitting = False
@@ -297,7 +386,7 @@ class CustomerApp:
                 self.camera_ready()
                 self.camera_status = 'Simulated camera · no webcam access'
                 while not self.stop.wait(.2) and self.camera_running:
-                    pass
+                    self.score(None)
                 return
             import cv2
             import mediapipe as mp
@@ -327,9 +416,11 @@ class CustomerApp:
                 image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 timestamp = max(previous_ms + 1, int(time.monotonic() * 1000))
                 previous_ms = timestamp
-                result = landmarker.detect_for_video(image, timestamp)
-                self.score(smile_score(result.face_blendshapes[0]) if result.face_blendshapes else None)
-                if result.face_landmarks:
+                with self.lock:
+                    busy = self.remote.get('busy') or self.submitting
+                result = None if busy else landmarker.detect_for_video(image, timestamp)
+                self.score(smile_score(result.face_blendshapes[0]) if result and result.face_blendshapes else None)
+                if result and result.face_landmarks:
                     h, w = frame.shape[:2]
                     points = result.face_landmarks[0]
                     a = (int(min(p.x for p in points)*w), int(min(p.y for p in points)*h))
@@ -354,77 +445,67 @@ class CustomerApp:
     def snapshot(self):
         with self.lock:
             remote = self.remote
-            observed_final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
-            watching_other = bool(remote.get('mission_id')) and (not self.pending or (self.pending.get('terminal') and self.pending.get('mission_id') != remote.get('mission_id')))
-            message = self.message
-            if watching_other and remote.get('busy'):
-                message = 'The agents are running a mission started on the main dashboard.'
-            elif watching_other and observed_final:
-                message = observed_final.get('customer_message') or observed_final.get('message') or 'Mission finished.'
-            latest = next((e for e in reversed(remote.get('events', [])) if e['kind'] in ('tool_start','tool_end','instruction','agent_end')), {})
+            pending = self.pending or {}
+            product = (remote.get('product_info') or {}).get('name') or remote.get('smile_product', 'your reward')
+            final = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'mission_end'), None)
+            external_mission = remote.get('busy') and pending.get('mission_id') != remote.get('mission_id')
+            mission = remote.get('mission_id') if remote.get('busy') else pending.get('mission_id') or remote.get('mission_id')
+            message = 'A mission started from the main dashboard is running. New smiles are paused.' if external_mission else self.message
+            terminal = pending.get('terminal') or (not pending and bool(final))
+            cooldown = max(0., self.gate.cooldown - (time.monotonic() - self.gate.last_trigger))
             reward = ''
-            if self.pending and self.pending.get('source') == 'smile' and (
-                    not self.pending.get('mission_id') or self.pending.get('mission_id') == remote.get('mission_id')):
-                same_mission = self.pending.get('mission_id') == remote.get('mission_id')
-                verified = remote.get('verified_product_name') if same_mission else None
-                reward = 'You won a ' + verified + '!' if verified else 'Smile registered! Checking your reward…'
-                if remote.get('mode') == 'demo':
-                    reward = 'Demo: You won a ' + remote.get('smile_product', 'Lemonade') + '!'
-                if self.pending.get('terminal') and observed_final and observed_final.get('status') == 'FAILED':
-                    reward = 'Smile registered — please ask staff about your reward.'
-            cooldown = max(0, self.gate.cooldown - (time.monotonic() - self.gate.last_trigger))
-            if not self.camera_running:
-                trigger_status = 'Start the camera to begin.'
-            elif not self.connected:
-                trigger_status = 'Waiting for Computer A to connect.'
-            elif self.processing_error:
-                trigger_status = 'Local state error. See diagnostics before starting another request.'
-            elif remote.get('busy') or self.submitting:
-                trigger_status = 'The agents are handling the current request.'
-            elif not self.eligible():
-                trigger_status = 'Waiting for confirmation of the previous request. Retry the same request if needed.'
-            elif not self.gate.armed:
-                trigger_status = 'Select Next customer to enable another smile.'
-            elif cooldown > 0:
-                trigger_status = f'Ready in {int(cooldown) + 1} seconds.'
-            elif self.gate.since is not None:
-                trigger_status = 'Smile detected — keep holding…'
+            if not external_mission and pending.get('mission_id') and pending.get('product') and pending.get('final_status') not in ('FAILED', 'REJECTED'):
+                reward = ('Demo: ' if remote.get('mode') == 'demo' else '') + 'You won a ' + pending['product'] + '!'
+            if not self.connected:
+                phase, title, instruction = 'connecting', 'Connecting to the agent team', 'The camera stays on while we reconnect.'
+            elif remote.get('protocol') != PROTOCOL:
+                phase, title, instruction = 'blocked', 'Both computers need the same update', 'Install the coordinated release on A and B, then restart.'
+            elif self.submitting:
+                phase, title, instruction = 'sending', 'Smile detected!', 'Sending your request to the agent team…'
+            elif remote.get('busy'):
+                phase, title, instruction = 'working', reward or 'The agents are working', 'Preparing the current order. New smiles are paused.'
+            elif pending and not pending.get('terminal'):
+                phase, title, instruction = 'checking', reward or 'Checking your request', 'Waiting for A to confirm the result. No new request will be sent.'
+            elif not remote.get('product_ready'):
+                phase, title, instruction = 'checking', 'Checking the reward', remote.get('readiness_message') or 'Waiting for the Odoo product check.'
+            elif not self.camera_running:
+                phase, title, instruction = 'camera', 'Camera needs attention', self.camera_status
+            elif self.needs_new_expression:
+                phase = 'finished'
+                title = 'Please ask staff about your order' if pending.get('final_status') == 'FAILED' else reward or 'Ready for the next customer'
+                instruction = f'Next customer in {int(cooldown)+1}s.' if cooldown > 0 else 'Relax your smile or step away briefly to welcome the next customer.'
             else:
-                trigger_status = 'Ready! Hold your smile at 75% or above for 0.6 seconds.'
-            return {'token': self.token, 'connected': self.connected, 'mode': remote.get('mode', 'unknown'),
-                    'build': BUILD, 'connection_error': self.connection_error, 'processing_error': self.processing_error,
-                    'can_retry': bool(self.pending and not self.pending.get('terminal') and (
-                        not self.pending.get('mission_id') or self.error)),
-                    'reward': reward, 'trigger_status': trigger_status,
-                    'product': remote.get('smile_product', 'Lemonade'), 'busy': remote.get('busy', False),
-                    'camera_running': self.camera_running, 'camera_status': self.camera_status,
-                    'score': round(self.gate.score, 3), 'armed': self.gate.armed, 'neutral_seen': self.gate.neutral_seen,
-                    'can_arm': self.eligible() and self.camera_running, 'can_start': self.eligible(), 'message': message, 'error': self.error,
-                    'request_id': (self.pending or {}).get('request_id'), 'mission_id': remote.get('mission_id') if watching_other else (self.pending or {}).get('mission_id'),
-                    'terminal': bool(observed_final) if watching_other else bool((self.pending or {}).get('terminal')), 'submitting': self.submitting,
-                    'activity': {'agent': latest.get('agent'), 'action': latest.get('action'), 'message': latest.get('message')},
-                    'odoo_target': remote.get('odoo_target'), 'odoo_status': self.odoo.status,
-                    'odoo_available': self.odoo.available, 'odoo_following': self.odoo.following,
-                    'odoo_display': self.odoo.snapshot(),
-                    'demo_camera': self.demo_camera}
+                phase, title = 'ready', 'Smile to win a ' + product
+                instruction = 'Hold your smile…' if self.gate.since is not None else 'Hold a smile at 75% or above for 0.6 seconds.'
+            latest = next((e for e in reversed(remote.get('events', [])) if e['kind'] in ('tool_start','tool_end','instruction','agent_start','agent_end')), {})
+            timeout = next((e for e in reversed(remote.get('events', [])) if e['kind'] == 'display_timeout'), None)
+            return {'token': self.token, 'build': BUILD, 'protocol': PROTOCOL,
+                'connected': self.connected, 'mode': remote.get('mode', 'unknown'), 'phase': phase, 'headline': title,
+                'reward': reward, 'trigger_status': instruction, 'product': product, 'busy': remote.get('busy', False),
+                'camera_running': self.camera_running, 'camera_status': self.camera_status, 'score': round(self.gate.score, 3),
+                'armed': self.gate.armed, 'neutral_seen': self.gate.neutral_seen,
+                'can_arm': self.eligible() and self.camera_running, 'can_start': self.eligible(),
+                'can_retry': bool(pending and not pending.get('terminal') and (not pending.get('mission_id') or self.error)),
+                'message': message, 'error': self.error, 'connection_error': self.connection_error, 'processing_error': self.processing_error,
+                'request_id': pending.get('request_id'), 'mission_id': mission, 'terminal': bool(terminal), 'submitting': self.submitting,
+                'activity': {'agent': latest.get('agent'), 'action': latest.get('action'), 'message': latest.get('message')},
+                'odoo_target': remote.get('odoo_target'), 'odoo_status': self.odoo.status,
+                'odoo_available': self.odoo.available, 'odoo_following': self.odoo.following, 'odoo_display': self.odoo.snapshot(),
+                'display_notice': timeout.get('message') if timeout else '', 'demo_camera': self.demo_camera,
+                'stream_cursor': self.stream_cursor, 'replayed_events': self.replayed_events}
 
     def diagnostics(self):
-        """Allowlisted read-only report: never include tokens, model text or credentials."""
         with self.lock:
             state = self.snapshot()
-            result = {key: state[key] for key in (
-                'build', 'connected', 'mode', 'connection_error', 'processing_error',
-                'camera_running', 'camera_status', 'score', 'armed', 'can_arm', 'can_retry',
-                'trigger_status', 'busy', 'request_id', 'mission_id', 'submitting',
-                'terminal', 'error', 'message', 'odoo_status', 'odoo_available', 'odoo_following')}
+            result = {k: state[k] for k in ('build','protocol','connected','mode','phase','headline','connection_error','processing_error',
+                'camera_running','camera_status','score','armed','can_arm','can_retry','trigger_status','busy','request_id',
+                'mission_id','submitting','terminal','error','message','odoo_status','odoo_available','odoo_following','stream_cursor','replayed_events','display_notice')}
             result.update(brain_url=self.config.get('brain_url'), odoo_url=self.config.get('odoo_url'),
                 gateway_build=self.remote.get('build', 'unknown'), gateway_instance=self.remote.get('instance_id'),
-                remote_mission_id=self.remote.get('mission_id'),
-                last_poll_age_seconds=round(time.monotonic() - self.last_poll, 2) if self.last_poll else None,
-                pending_terminal=bool((self.pending or {}).get('terminal')),
-                pending_mission_id=(self.pending or {}).get('mission_id'),
-                display_attempts=self.display_attempts,
-                display_launch_error=self.odoo.launch_error, trace=list(self.trace))
+                remote_mission_id=self.remote.get('mission_id'), product_ready=self.remote.get('product_ready'),
+                last_poll_age_seconds=round(time.monotonic()-self.last_poll,2) if self.last_poll else None,
+                pending_terminal=bool((self.pending or {}).get('terminal')), pending_mission_id=(self.pending or {}).get('mission_id'),
+                display_attempts=self.display_attempts, display_launch_error=self.odoo.launch_error, trace=list(self.trace))
             return result
 
     def close(self):

@@ -8,6 +8,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _rpc_transport(url, timeout):
+    if timeout is None:
+        return None
+    base = xmlrpc.client.SafeTransport if url.startswith('https:') else xmlrpc.client.Transport
+    class BoundedTransport(base):
+        def make_connection(self, host):
+            connection = super().make_connection(host)
+            connection.timeout = timeout
+            return connection
+    return BoundedTransport()
+
+
 def _required_env(
     name: str,
 ) -> str:
@@ -47,6 +59,7 @@ class OdooBridge:
 
     def __init__(
         self,
+        rpc_timeout=None,
     ):
         self.url = _required_env(
             "ODOO_URL"
@@ -78,7 +91,7 @@ class OdooBridge:
 
         self.common = (
             xmlrpc.client.ServerProxy(
-                f"{self.url}/xmlrpc/2/common"
+                f"{self.url}/xmlrpc/2/common", transport=_rpc_transport(self.url, rpc_timeout)
             )
         )
 
@@ -105,7 +118,7 @@ class OdooBridge:
 
         self.models = (
             xmlrpc.client.ServerProxy(
-                f"{self.url}/xmlrpc/2/object"
+                f"{self.url}/xmlrpc/2/object", transport=_rpc_transport(self.url, rpc_timeout)
             )
         )
 
@@ -1080,6 +1093,8 @@ class OdooBridge:
             fields=[
                 "product_id",
                 "product_uom_qty",
+                "price_unit",
+                "price_subtotal",
             ],
         )
 
@@ -1112,6 +1127,9 @@ class OdooBridge:
                 )
                 or 0
             ),
+            "unit_price": float(line["price_unit"]),
+            "net_unit_price": (float(line["price_subtotal"]) / float(line["product_uom_qty"])
+                               if line["product_uom_qty"] else 0.0),
             "state": str(
                 so.get(
                     "state",
@@ -1156,7 +1174,10 @@ class OdooBridge:
             limit=1,
         )
 
+        from erp_bar.odoo.sales_pricing import enforce_sales_price
+
         if existing_ids:
+            enforce_sales_price(self, int(existing_ids[0]), allow_update=True)
             existing = (
                 self._read_sales_order(
                     int(existing_ids[0])
@@ -1212,6 +1233,8 @@ class OdooBridge:
         ):
             so_id = so_id[0]
 
+        enforce_sales_price(self, int(so_id), allow_update=True)
+
         result = (
             self._read_sales_order(
                 int(so_id)
@@ -1256,6 +1279,9 @@ class OdooBridge:
             )
         )
 
+        from erp_bar.odoo.sales_pricing import enforce_sales_price
+        enforce_sales_price(self, sales_order_id, allow_update=True)
+
         if current["state"] in {
             "draft",
             "sent",
@@ -1266,6 +1292,7 @@ class OdooBridge:
                 [sales_order_id],
             )
 
+        enforce_sales_price(self, sales_order_id, allow_update=False)
         return self.get_sales_order(
             sales_order_id
         )

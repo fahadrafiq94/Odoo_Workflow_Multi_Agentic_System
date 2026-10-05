@@ -23,7 +23,11 @@ def main():
     parser.add_argument("--companion-port", type=int, default=8766)
     parser.add_argument("--smile-product", default="Lemonade")
     parser.add_argument("--odoo-display-url", default="", help="Odoo URL reachable from the second computer")
+    parser.add_argument("--display-wait", type=float, default=4, help="Maximum seconds to wait for a draft order view on B (0 disables)")
+    parser.add_argument("--window-wait", type=float, default=8, help="Maximum seconds to wait for B's Odoo window at mission start")
     args = parser.parse_args()
+    if not 0 <= args.display_wait <= 10 or not 0 <= args.window_wait <= 20:
+        parser.error("Use --display-wait between 0 and 10 and --window-wait between 0 and 20 seconds")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
     if not 1 <= args.companion_port <= 65535 or (args.companion_host and args.companion_port == args.port):
@@ -43,19 +47,23 @@ def main():
     server = make_server(session, args.port)
     companion = None
     if args.companion_host:
-        from erp_bar.agent_view.companion_gateway import CompanionGateway, make_companion_server
+        from erp_bar.agent_view.companion_gateway import CompanionGateway, make_companion_server, BUILD, PROTOCOL
         pairing_path = ROOT / "companion_pairing.json"
         previous = json.loads(pairing_path.read_text()) if pairing_path.exists() else {}
-        pairing = {"brain_url": f"http://{args.companion_host}:{args.companion_port}",
+        pairing = {**previous, "brain_url": f"http://{args.companion_host}:{args.companion_port}",
                    "token": previous.get("token") or secrets.token_urlsafe(40),
                    "odoo_url": args.odoo_display_url or previous.get("odoo_url", ""),
-                   "camera_index": 0, "model_path": "face_landmarker.task", "browser_channel": "chromium"}
-        gateway = CompanionGateway(session, pairing["token"], args.smile_product, ROOT / "companion_state" / "requests.sqlite3")
+                   "protocol": PROTOCOL, "build": BUILD}
+        for key, value in {"camera_index": 0, "model_path": "face_landmarker.task", "browser_channel": "chromium"}.items():
+            pairing.setdefault(key, value)
+        gateway = CompanionGateway(session, pairing["token"], args.smile_product, ROOT / "companion_state" / "requests.sqlite3",
+                                   display_wait_seconds=args.display_wait, window_wait_seconds=args.window_wait)
         companion = make_companion_server(gateway, args.companion_host, args.companion_port)
         pairing_path.write_text(json.dumps(pairing, indent=2))
         pairing_path.chmod(0o600)
         threading.Thread(target=companion.serve_forever, daemon=True).start()
         print(f"Second screen enabled. Copy {pairing_path.name} privately to the second computer.")
+        print(f"Release {BUILD} · protocol {PROTOCOL} · SSE: {pairing['brain_url']}/v1/events")
     url = f"http://127.0.0.1:{args.port}"
     print(f"ERP_BAR agent view: {url}")
     print("LIVE: starting a mission writes Odoo orders and validates receipts/delivery." if args.live

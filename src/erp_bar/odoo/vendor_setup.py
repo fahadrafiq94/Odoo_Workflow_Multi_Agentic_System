@@ -102,5 +102,6 @@ def setup_product_vendor(bridge, product_id, profile):
         or float(link["min_qty"]) != 0 or link.get("date_start") or link.get("date_end")
     ):
         raise ValueError("Supplier relationship conflicts with configured product, currency, price or unrestricted quantity/date terms.")
+    print(f"[supplier_setup] Verified Odoo contact ID {vendor_id}: {partner['name']} | email: {partner['email']}")
     return dict(vendor_id=vendor_id, supplierinfo_id=link_id, supplier_key=profile.supplier_key,
                 vendor_created=vendor_created, link_created=link_created)

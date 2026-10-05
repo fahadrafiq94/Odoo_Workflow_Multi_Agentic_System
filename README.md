@@ -15,6 +15,7 @@ A multi-agent order-fulfillment demo that connects local language models to Odoo
 - [Camera and Odoo on a second computer](#camera-and-odoo-on-a-second-computer)
 - [Business policies](#business-policies)
 - [Command-line options](#command-line-options)
+- [Tests and verification](#tests-and-verification)
 - [Project layout](#project-layout)
 - [Local state and recovery](#local-state-and-recovery)
 - [Troubleshooting](#troubleshooting)
@@ -264,8 +265,6 @@ Download the official MediaPipe model into the same directory:
 ```powershell
 Invoke-WebRequest -Uri 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' -OutFile face_landmarker.task
 ```
-
-Alternatively, copy your existing compatible `face_landmarker.task` file there. The model and browser binaries are not bundled with the repository.
 
 ### 2. Test pairing in demo mode first
 

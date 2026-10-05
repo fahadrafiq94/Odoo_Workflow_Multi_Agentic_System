@@ -31,6 +31,10 @@ class Session:
         self.mission_id = None
         self.product, self.quantity = "Lemonade", 1
         self.worker = worker or (run_live if live else run_demo)
+        self.event_listeners = []
+        self.before_work = None
+        self.after_event = None
+        self.expected_product_id = None
 
     def publish(self, event):
         with self.condition:
@@ -44,7 +48,13 @@ class Session:
                     item.get("kind") == "model_stream" and item.get("stream_id") == event.get("stream_id")
                     and item.get("agent") == event.get("agent"))), maxlen=2000)
             self.events.append(event)
+            # Listeners only persist public workflow events. Browser waits happen
+            # after releasing this lock so SSE and acknowledgements can proceed.
+            for listener in tuple(self.event_listeners):
+                listener(event)
             self.condition.notify_all()
+        if self.after_event:
+            self.after_event(event)
 
     def snapshot(self):
         with self.condition:
@@ -73,7 +83,7 @@ class Session:
             time.sleep(0.1)
             remaining -= 0.1 * speed
 
-    def start(self, product, quantity, request_id):
+    def start(self, product, quantity, request_id, expected_product_id=None):
         if not isinstance(product, str) or not product.strip() or len(product) > 120 or any(ord(c) < 32 for c in product):
             raise ValueError("Enter a product name or SKU (up to 120 characters).")
         if isinstance(quantity, bool) or not isinstance(quantity, (int, float)) or not math.isfinite(quantity) or quantity <= 0:
@@ -88,6 +98,7 @@ class Session:
             self.busy = True
             self.mission_id = "MISSION-" + uuid4().hex[:12].upper()
             self.product, self.quantity = product.strip(), quantity
+            self.expected_product_id = expected_product_id
             self.events.clear()
             self.requests[request_id] = self.mission_id
             if len(self.requests) > 100:
@@ -100,6 +111,8 @@ class Session:
     def _work(self):
         with event_sink(self.publish):
             try:
+                if self.before_work:
+                    self.before_work(self.mission_id)
                 self.worker(self)
             except Exception:
                 traceback.print_exc()
@@ -138,6 +151,8 @@ def run_live(session):
                                 or not math.isclose(items[0].requested_qty, session.quantity, rel_tol=1e-9, abs_tol=1e-9)):
                             raise ValueError("Parsed product or quantity differs from the submitted request.")
                         product_id = items[0].product_id
+                        if product_id is not None and session.expected_product_id is not None and product_id != session.expected_product_id:
+                            raise ValueError("Resolved product differs from the product accepted for this smile request.")
                         if verified_product_id is not None and product_id != verified_product_id:
                             raise ValueError("Resolved product ID changed during the mission.")
                         if product_id is not None and verified_product_id is None:

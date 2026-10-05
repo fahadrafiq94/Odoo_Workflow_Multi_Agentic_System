@@ -10,11 +10,12 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from erp_bar_customer.app import BrainClient, NoRedirect
-from erp_bar_customer.diagnostics import BUILD, error_text
+from erp_bar_customer.diagnostics import BUILD, PROTOCOL, error_text
 from erp_bar_customer.odoo_display import record_url
 
 LOCAL_FIELDS = (
-    'build', 'connected', 'mode', 'brain_url', 'odoo_url', 'gateway_build', 'gateway_instance',
+    'build', 'protocol', 'connected', 'mode', 'phase', 'product_ready', 'stream_cursor', 'replayed_events',
+    'display_notice', 'brain_url', 'odoo_url', 'gateway_build', 'gateway_instance',
     'last_poll_age_seconds', 'camera_running', 'camera_status', 'score', 'armed', 'can_arm',
     'can_retry', 'trigger_status', 'busy', 'submitting', 'request_id', 'mission_id',
     'remote_mission_id', 'pending_mission_id', 'pending_terminal', 'terminal',
@@ -53,7 +54,8 @@ def inspect_environment(pairing, port):
         if not isinstance(remote, dict) or remote.get('mode') not in ('live', 'demo') or not isinstance(remote.get('events'), list):
             raise ValueError('Wrong service: expected the paired workflow API on port 8766.')
         report['main'] = {key: remote.get(key) for key in (
-            'build', 'instance_id', 'mode', 'busy', 'mission_id', 'last_id', 'smile_product', 'verified_product_name')}
+            'build', 'protocol', 'instance_id', 'mode', 'busy', 'mission_id', 'last_id', 'stream_id',
+            'smile_product', 'verified_product_name', 'product_ready', 'readiness_message')}
         final = next((e for e in reversed(remote['events']) if e.get('kind') == 'mission_end'), None)
         report['main']['final_status'] = final.get('status') if final else None
         add('Authenticated connection to A', 'PASS', 'GET /v1/state succeeded; pairing token was not printed.')
@@ -61,6 +63,10 @@ def inspect_environment(pairing, port):
             remote['mode'] + (' · Odoo will stay closed in demo mode.' if remote['mode'] == 'demo' else ''))
         add('Gateway version', 'PASS' if remote.get('build') == BUILD else 'WARN',
             f"{remote.get('build', 'older build')} · expected {BUILD}; restart A after applying the update.")
+        add('Protocol compatibility', 'PASS' if remote.get('protocol') == PROTOCOL else 'FAIL',
+            f"A reports protocol {remote.get('protocol', 'unknown')}; B requires {PROTOCOL}. Update both computers together.")
+        add('Reward product', 'PASS' if remote.get('product_ready') else 'FAIL',
+            remote.get('verified_product_name') or remote.get('readiness_message') or 'Waiting for A to verify the exact product in Odoo.')
     except Exception as exc:
         add('Pairing / connection to A', 'FAIL', error_text(exc, (config.get('token'),)))
 
@@ -132,9 +138,11 @@ def inspect_environment(pairing, port):
         elif remote and local.get('gateway_instance'):
             add('Same A instance', 'PASS', local['gateway_instance'])
         if local.get('connected') is not True:
-            add('B polling A', 'FAIL', local.get('connection_error') or 'B is not connected. Check its pairing path and restart it.')
+            add('B event stream', 'FAIL', local.get('connection_error') or 'B is not connected. Check its pairing path and restart it.')
         else:
-            add('B polling A', 'PASS', f"mode={local.get('mode')}; remote mission={local.get('remote_mission_id', local.get('mission_id'))}")
+            age = local.get('last_poll_age_seconds')
+            add('B event stream', 'PASS' if isinstance(age, (int, float)) and age < 4 else 'WARN',
+                f"Last event/heartbeat {age}s ago; cursor={local.get('stream_cursor')}; mode={local.get('mode')}; remote mission={local.get('remote_mission_id', local.get('mission_id'))}")
         if local.get('processing_error'):
             add('Local state processing', 'FAIL', local['processing_error'])
         if local.get('display_launch_error'):

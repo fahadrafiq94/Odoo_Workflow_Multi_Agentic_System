@@ -1,7 +1,8 @@
 """Small, credential-free diagnostics shared by the app and read-only checker."""
 import re
 
-BUILD = '2026.10.02.2'
+BUILD = '2026.10.05.1'
+PROTOCOL = 2
 
 
 def error_text(error, secrets=()):
