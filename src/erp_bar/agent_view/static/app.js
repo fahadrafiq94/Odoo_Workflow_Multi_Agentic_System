@@ -4,12 +4,13 @@ const EMPTY_FEED = $('feed').firstElementChild.cloneNode(true);
 const AGENTS = {supervisor:{name:'Supervisor',color:'#a1de6b'},sales_agent:{name:'Sales',color:'#85b8f8'},inventory_agent:{name:'Inventory',color:'#70d4b8'},purchase_agent:{name:'Purchase',color:'#e8ba72'}};
 const LABELS = {INTERPRET_DEMAND:'Interpret demand',CHECK_INVENTORY:'Check inventory',RESOLVE_PRODUCT:'Resolve product',VERIFY_STOCK:'Verify stock',PROCURE_SHORTAGE:'Procure shortage',CREATE_SALES_ORDER:'Create sales order',FULFILL_DELIVERY:'Fulfill delivery',REPORT_PROCUREMENT_FAILURE:'Prepare customer response'};
 let instruction=null, demoPaused=false, demoSpeed=1;
+let awaitingSmileMission=false, previousRecordsMission=null, displayedRecords={};
 let liveQueue=[], receivedId=0, sourceBusy=false, sourceOutcome='', beatRemaining=0, playbackTick=performance.now();
 const LIVE_VIEW_KEY='erp-bar-live-presentation-v3';
 const thinkingReveal=new Map(), thinkingNodes=new Map();
 let typingTick=performance.now(),typingSavedAt=0;
 function savedLiveView(){try{return JSON.parse(sessionStorage.getItem(LIVE_VIEW_KEY))||{};}catch{return {};}}
-function saveLiveView(){try{sessionStorage.setItem(LIVE_VIEW_KEY,JSON.stringify({missionId,lastId,paused:demoPaused,speed:demoSpeed,inflight:events.filter(e=>e.kind==='model_stream'&&(!e.complete||thinkingPending(e))),typing:events.filter(thinkingPending).map(e=>[thinkingKey(e),thinkingCount(e)])}));}catch{}}
+function saveLiveView(){try{sessionStorage.setItem(LIVE_VIEW_KEY,JSON.stringify({missionId,lastId,displayedRecords,timer:{started,ended},paused:demoPaused,speed:demoSpeed,inflight:events.filter(e=>e.kind==='model_stream'&&(!e.complete||thinkingPending(e))),typing:events.filter(thinkingPending).map(e=>[thinkingKey(e),thinkingCount(e)])}));}catch{}}
 function readingBeat(e){return ['thinking','proposal','instruction','handoff','tool_start','tool_end','checkpoint_rejected','model_error','mission_end','connecting'].includes(e.kind)||(e.kind==='agent_end'&&e.agent!=='supervisor');}
 function observeSource(e){
  if(e.kind==='mission_start'){sourceBusy=true;sourceOutcome='';}
@@ -21,8 +22,7 @@ function receive(e){
  if(e.id<=receivedId)return;
  if(e.mission_id!==missionId){liveQueue=[];beatRemaining=0;lastId=0;reset(e.mission_id);sourceOutcome='';}
  receivedId=e.id;observeSource(e);
- // ERP references reflect the real mission even while chat playback is paused.
- if(mode==='live'&&e.erp_records)renderRecords(e.erp_records);
+ if(e.kind==='mission_start'){startMissionClock();saveLiveView();}
  liveQueue.push(e);render();
 }
 function drainLiveQueue(){
@@ -65,6 +65,8 @@ const name = key => AGENTS[key]?.name || 'System';
 const stamp = date => date ? new Date(date).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) : '—';
 function text(id,value){$(id).textContent=value;}
 function renderRecords(records={}){
+ if(awaitingSmileMission)return;
+ displayedRecords=records;
  for(const key of ['purchase','sales','delivery']){
   const target=$(key+'-id'),rows=records[key]||[];
   target.replaceChildren();
@@ -78,14 +80,14 @@ function renderRecords(records={}){
   }
  }
 }
-function reset(id){thinkingReveal.clear();thinkingNodes.clear();typingTick=performance.now();missionId=id;instruction=null;events=[];$('feed').replaceChildren(EMPTY_FEED.cloneNode(true));agents=defaults();active=null;selected='supervisor';route=null;started=null;ended=null;toolCount=handoffs=0;lastFocus='';clearInterval(typeTimer);$('outcome').hidden=true;text('sales-id','—');text('purchase-id','—');text('delivery-id','—');text('mission-id',id || 'No mission started');text('mission-status',id?'Starting mission':'Ready to begin');text('focus-title','The team is ready.');text('focus-text','Start a mission to see the supervisor select an agent, watch tools execute, and follow the results back to the team.');}
+function reset(id){text('elapsed','00:00');displayedRecords={};if(id && id!==previousRecordsMission)awaitingSmileMission=false;thinkingReveal.clear();thinkingNodes.clear();typingTick=performance.now();missionId=id;instruction=null;events=[];$('feed').replaceChildren(EMPTY_FEED.cloneNode(true));agents=defaults();active=null;selected='supervisor';route=null;started=null;ended=null;toolCount=handoffs=0;lastFocus='';clearInterval(typeTimer);$('outcome').hidden=true;text('sales-id','—');text('purchase-id','—');text('delivery-id','—');text('mission-id',id || 'No mission started');text('mission-status',id?'Starting mission':'Ready to begin');text('focus-title','The team is ready.');text('focus-text','Start a mission to see the supervisor select an agent, watch tools execute, and follow the results back to the team.');}
 function accept(e, replay=false){
  if(e.mission_id!==missionId) reset(e.mission_id);
  if(!replay && e.id<=lastId)return;
  lastId=Math.max(lastId,e.id || 0);
  const a=agents[e.agent];
  if(e.kind==='demo_control'){demoPaused=e.paused;demoSpeed=e.speed;}
- if(e.kind==='mission_start'){busy=true;started=new Date(e.time).getTime();ended=null;text('mission-status','Mission in progress');$('product').value=e.product;$('quantity').value=e.quantity;}
+ if(e.kind==='mission_start'){busy=true;startMissionClock();text('mission-status','Mission in progress');$('product').value=e.product;$('quantity').value=e.quantity;}
  if(e.kind==='agent_start'&&a){active=e.agent;selected=e.agent;Object.assign(a,{state:'active',title:'Assessing the mission',message:e.message,time:e.time,action:null,detail:''});}
  if(e.kind==='thinking'&&a){a.streamId=e.stream_id;a.summary='';Object.assign(a,{state:'thinking',title:'Choosing the next action',message:'Generating a response. Follow the model in the chat.',time:e.time,action:null,detail:''});active=e.agent;selected=e.agent;}
  if(e.kind==='decision_summary'&&a){
@@ -118,9 +120,10 @@ function accept(e, replay=false){
  if(e.kind==='agent_end'&&a){a.state=e.status==='FAILED'||e.status==='PROCUREMENT_FAILED'||['MISSION_FAILED','PROCUREMENT_FAILED'].includes(e.decision)?'issue':'complete';a.time=e.time;a.message=e.message;if(e.agent!=='supervisor')a.summary=e.message;if(active===e.agent)active=null;}
  if(e.kind==='handoff'){route={source:e.source,target:e.target,message:e.message,action:e.action};handoffs++;if(agents[e.target]){selected=e.target;agents[e.target].title=human(e.action)||'Receiving task';if(e.target!=='supervisor')agents[e.target].message=instruction?.target===e.target?instruction.objective:e.message;} }
  if(e.status && e.kind!=='mission_end')text('mission-status',human(e.status));
- if(mode==='demo'&&e.erp_records)renderRecords(e.erp_records);
+ // Only reveal observed records when their result reaches the presentation.
+ if(e.erp_records && ((e.kind==='tool_end'&&e.ok===true)||['agent_end','mission_end'].includes(e.kind)))renderRecords(e.erp_records);
  if(e.kind==='mission_end'){
-   ended=new Date(e.time).getTime();active=null;
+   ended ??= Math.max(started ?? Date.now(),Date.now());updateMissionClock();active=null;
    for(const a of Object.values(agents)) if(['thinking','executing','active','proposal','reviewing'].includes(a.state))a.state=e.status==='DELIVERED'?'complete':'issue';
    text('mission-status',e.status==='DELIVERED'?'Delivered successfully':'Could not complete');
    $('outcome').hidden=false;$('outcome').classList.toggle('failed',e.status!=='DELIVERED');
@@ -196,7 +199,6 @@ function renderDemoControls(){
  const live=mode==='live';
  text('mission-section-label',live?'DISPLAYED MISSION STEP':'CURRENT MISSION');
  text('pace-note',live?'Display only. Odoo operations continue while you read.':demoPaused?'Paused for discussion. Resume when you are ready.':'A reading pause between decisions, actions and replies.');
- $('jump-latest').hidden=!live;$('jump-latest').disabled=liveQueue.length===0&&!hasPendingThinking();
  $('live-progress').hidden=!live;
  if(live){const actual=sourceOutcome?`Workflow ${sourceOutcome.toLowerCase()}`:sourceBusy?'Workflow running':'Workflow ready';text('live-progress',`${actual} · ${liveQueue.length?liveQueue.length+' updates waiting':hasPendingThinking()?'Revealing thinking text':'Display up to date'}`);}
  $('agent-canvas').classList.toggle('demo-paused',demoPaused);$('feed').classList.toggle('typing-paused',demoPaused||!connected);
@@ -209,11 +211,6 @@ async function controlDemo(paused,speed){
  try{const r=await fetch('/api/demo-control',{method:'POST',headers:{'Content-Type':'application/json','X-ERP-Bar-Token':token},body:JSON.stringify({paused,speed})});const data=await r.json();if(!r.ok)throw Error(data.error);demoPaused=data.paused;demoSpeed=data.speed;render();}
  catch(e){text('form-error',e.message||'Unable to change presentation pace.');}
 }
-$('jump-latest').addEventListener('click',()=>{
- if(mode!=='live')return;
- for(const e of liveQueue)accept(e,true);
- liveQueue=[];beatRemaining=0;settleThinking();saveLiveView();render();
-});
 $('demo-pause').addEventListener('click',()=>controlDemo(!demoPaused,demoSpeed));
 $('demo-speed').addEventListener('change',()=>controlDemo(demoPaused,Number($('demo-speed').value)));
 function node(tag,cls,value){const n=document.createElement(tag);n.className=cls;if(value!==undefined)n.textContent=value;return n;}
@@ -268,12 +265,18 @@ function configure(data){
  const switching=data.mode!==mode;mode=data.mode;
  if(mode==='demo'){demoPaused=data.demo_paused??demoPaused;demoSpeed=data.demo_speed??demoSpeed;}
  else if(switching){const saved=savedLiveView();demoPaused=saved.paused===true;demoSpeed=[.5,1,2,4].includes(saved.speed)?saved.speed:1;}
- token=data.token||token;const badge=$('mode-badge');badge.className='pill '+mode;badge.textContent=mode==='live'?'LIVE · ODOO WORKFLOW':'DEMO · SIMULATED';text('record-mode',mode==='demo'?'DEMO':'ODOO');text('record-note',mode==='demo'?'Simulated · no Odoo records.':'Current mission · updates live.');text('mode-note',mode==='demo'?'Preview the complete flow. No ERP records are changed.':'Creates real Odoo orders and validates receipts and delivery.');
+ token=data.token||token;const badge=$('mode-badge');badge.className='pill '+mode;badge.textContent=mode==='live'?'LIVE · ODOO WORKFLOW':'DEMO · SIMULATED';text('record-mode',mode==='demo'?'DEMO':'ODOO');text('record-note',mode==='demo'?'Simulated · no Odoo records.':'Appears after each completed action.');text('mode-note',mode==='demo'?'Preview the complete flow. No ERP records are changed.':'Creates real Odoo orders and validates receipts and delivery.');
 }
 function snapshot(data){
+ const previousTimer=missionId===data.mission_id&&started!==null?{started,ended}:null;
  configure(data);
  const saved=savedLiveView(),cursor=mode==='live'&&saved.missionId===data.mission_id?Math.min(saved.lastId||0,data.last_id):0;
  reset(data.mission_id);lastId=0;liveQueue=[];beatRemaining=0;sourceOutcome='';sourceBusy=data.busy;
+ const timer=previousTimer || (saved.missionId===data.mission_id?saved.timer:null);
+ if(timer && Number.isFinite(timer.started)){
+  started=timer.started;ended=Number.isFinite(timer.ended)?Math.max(started,timer.ended):null;
+  updateMissionClock();
+ }
  if(mode==='live'){
   for(const e of data.events){observeSource(e);if(e.id<=cursor)accept(e,true);else liveQueue.push(e);}
   // Completed calls are compacted on the server. Preserve the visible partial
@@ -288,7 +291,9 @@ function snapshot(data){
  settleThinking();
  if(mode==='live'&&saved.missionId===data.mission_id)for(const [key,count] of saved.typing||[])if(thinkingReveal.has(key))thinkingReveal.set(key,{count,credit:0});
  if(busy){$('product').value=data.product;$('quantity').value=data.quantity;}
- renderRecords(data.erp_records);
+ // A server snapshot can be ahead of the guided display. Restore only the
+ // records saved at this display cursor, never the server's latest aggregate.
+ if(mode==='live'&&saved.missionId===data.mission_id&&saved.lastId===cursor&&saved.displayedRecords)renderRecords(saved.displayedRecords);
  render();
 }
 $('request-form').addEventListener('submit',async event=>{
@@ -306,7 +311,14 @@ function scrollChatToLatest(){
  requestAnimationFrame(()=>{feed.scrollTop=feed.scrollHeight;});
 }
 $('follow').addEventListener('click',scrollChatToLatest);
-setInterval(()=>{const seconds=started?Math.max(0,Math.floor(((ended||Date.now())-started)/1000)):0;text('elapsed',`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`);for(const [key,a] of Object.entries(agents)){document.querySelector(`[data-agent="${key}"] .agent-timer`).textContent=active===key&&a.time&&busy&&connected&&!(mode==='live'&&(liveQueue.length||demoPaused))?`${Math.max(0,Math.floor((Date.now()-new Date(a.time))/1000))}s`:'';}},1000);
+// One clock for the whole displayed mission, including reading pauses.
+// Backend timestamps still label events but never replace presentation duration.
+function startMissionClock(){started ??= Date.now();updateMissionClock();}
+function updateMissionClock(){
+ const seconds=started===null?0:Math.max(0,Math.floor(((ended??Date.now())-started)/1000));
+ text('elapsed',`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`);
+}
+setInterval(()=>{updateMissionClock();for(const [key,a] of Object.entries(agents)){document.querySelector(`[data-agent="${key}"] .agent-timer`).textContent=active===key&&a.time&&busy&&connected&&!(mode==='live'&&(liveQueue.length||demoPaused))?`${Math.max(0,Math.floor((Date.now()-new Date(a.time))/1000))}s`:'';}},1000);
 new ResizeObserver(drawRoutes).observe($('agent-canvas'));
 new ResizeObserver(scrollChatToLatest).observe($('feed'));
 async function connect(){
@@ -317,3 +329,9 @@ drawRoutes();connect();
 
 // Smile orders wait until the guided conversation has finished displaying too.
 window.erpBarCanAcceptSmile = () => connected && !busy && !sourceBusy && liveQueue.length === 0 && !hasPendingThinking();
+
+// Clear at smile registration, before the request round-trip or paced playback.
+window.erpBarSmileRegistered = () => {
+ awaitingSmileMission=false;renderRecords({});
+ previousRecordsMission=missionId;awaitingSmileMission=true;
+};

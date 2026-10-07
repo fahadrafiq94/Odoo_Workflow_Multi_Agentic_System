@@ -237,7 +237,7 @@ The dashboard uses a single-page layout:
 
 Demo and live use the same presentation. Demo text is simulated; live text comes from the configured model's thinking stream when it emits one. Generated text is explanatory model output, not proof that an ERP action succeeded; use the tool results and mission outcome for that.
 
-Reading speeds are **0.5×, 1×, 2×, and 4×**. Pause and slower playback help viewers follow the conversation. In live mode, these controls affect the **display only**: agents and Odoo actions continue. Use **Jump to latest** to catch up when the view is showing earlier events.
+Reading speeds are **0.5×, 1×, 2×, and 4×**. Pause and slower playback help viewers follow the conversation. In live mode, these controls affect the **display only**: agents and Odoo actions continue. Increase Reading speed to catch up when the view is showing earlier events. Odoo references appear as their successful action results reach the display.
 
 Closing the browser does not cancel an accepted mission.
 

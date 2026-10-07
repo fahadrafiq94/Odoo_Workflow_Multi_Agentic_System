@@ -43,8 +43,6 @@ function eligible() {
 }
 function render() {
   if (!enabled) return;
-  const name = state?.product_info?.name;
-  $('camera-product').textContent = name ? `1 × ${name}` : 'Checking the reward…';
   if ($('camera-reward').textContent !== reward) $('camera-reward').textContent = reward;
   $('camera-reward').hidden = !reward;
   let message;
@@ -74,21 +72,45 @@ async function submit() {
   try { localStorage.setItem(storageKey + '-last-trigger', String(Date.now())); }
   catch { storageError = 'Allow site storage, then reload. Automatic orders are paused.'; return; }
   if (!savePending({request_id: crypto.randomUUID()})) return;
+  window.erpBarSmileRegistered?.();
   await reconcile();
+}
+function celebrateReward() {
+  const layer = $('reward-confetti');
+  layer.replaceChildren();
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const colors = ['#96cc64', '#f3c653', '#70b6d8', '#dd91af', '#b89bd6'];
+  for (let i = 0; i < 24; i++) {
+    const piece = document.createElement('i');
+    piece.style.setProperty('--confetti-x', `${(i % 2 ? 1 : -1) * (18 + Math.random() * 85)}px`);
+    piece.style.setProperty('--confetti-y', `${-25 - Math.random() * 75}px`);
+    piece.style.setProperty('--confetti-turn', `${Math.random() * 540 - 270}deg`);
+    piece.style.setProperty('--confetti-delay', `${Math.random() * 120}ms`);
+    piece.style.backgroundColor = colors[i % colors.length];
+    layer.append(piece);
+    piece.addEventListener('animationend', () => piece.remove(), {once: true});
+  }
 }
 async function reconcile() {
   if (!pending || requestBusy || pending.uncertain || !ownsCamera) return;
   requestBusy = true; render();
   try {
-    const result = await api('/api/smile-requests/' + pending.request_id);
+    let result = await api('/api/smile-requests/' + pending.request_id);
     if (result.state === 'not_found') {
       // Retry the same identifier only. The backend serializes/rejects busy requests.
       await api('/api/smile', {request_id: pending.request_id});
-    } else if (result.state === 'uncertain') {
+      result = await api('/api/smile-requests/' + pending.request_id);
+    }
+    if (result.state === 'uncertain') {
       savePending({...pending, uncertain: true});
-    } else {
+    } else if (['accepted', 'completed'].includes(result.state)) {
       const prefix = result.product_info?.simulated ? 'Demo: ' : '';
-      reward = `${prefix}You won a ${result.product}!`;
+      const productName = result.product_info?.name || result.product;
+      const successful = result.state === 'accepted' || result.final?.status === 'DELIVERED';
+      reward = `${prefix}You have won ${/^[aeiou]/i.test(productName) ? 'an' : 'a'} ${productName}!`;
+      if (successful && !pending.celebrated) {
+        if (savePending({...pending, celebrated: true})) celebrateReward();
+      }
       if (result.state === 'completed') {
         if (result.final?.status !== 'DELIVERED') reward = 'The order needs attention. Please ask staff.';
         savePending(null); gate.pause();
