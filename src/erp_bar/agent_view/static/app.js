@@ -20,7 +20,10 @@ function receive(e){
  if(mode==='demo'&&e.kind==='demo_control'){accept(e);return;}
  if(e.id<=receivedId)return;
  if(e.mission_id!==missionId){liveQueue=[];beatRemaining=0;lastId=0;reset(e.mission_id);sourceOutcome='';}
- receivedId=e.id;observeSource(e);liveQueue.push(e);render();
+ receivedId=e.id;observeSource(e);
+ // ERP references reflect the real mission even while chat playback is paused.
+ if(mode==='live'&&e.erp_records)renderRecords(e.erp_records);
+ liveQueue.push(e);render();
 }
 function drainLiveQueue(){
  const now=performance.now(),delta=Math.min(250,now-playbackTick);playbackTick=now;
@@ -61,6 +64,20 @@ const human = value => LABELS[value] || String(value || '').replaceAll('_',' ').
 const name = key => AGENTS[key]?.name || 'System';
 const stamp = date => date ? new Date(date).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) : '—';
 function text(id,value){$(id).textContent=value;}
+function renderRecords(records={}){
+ for(const key of ['purchase','sales','delivery']){
+  const target=$(key+'-id'),rows=records[key]||[];
+  target.replaceChildren();
+  if(!rows.length){target.textContent='—';continue;}
+  if(mode==='demo'){target.textContent='Simulated';continue;}
+  for(const row of rows){
+   const item=document.createElement('span');item.className='record-reference';
+   item.textContent=row.name||`ID ${row.id}`;
+   item.title=`Odoo database ID: ${row.id}`;
+   target.append(item);
+  }
+ }
+}
 function reset(id){thinkingReveal.clear();thinkingNodes.clear();typingTick=performance.now();missionId=id;instruction=null;events=[];$('feed').replaceChildren(EMPTY_FEED.cloneNode(true));agents=defaults();active=null;selected='supervisor';route=null;started=null;ended=null;toolCount=handoffs=0;lastFocus='';clearInterval(typeTimer);$('outcome').hidden=true;text('sales-id','—');text('purchase-id','—');text('delivery-id','—');text('mission-id',id || 'No mission started');text('mission-status',id?'Starting mission':'Ready to begin');text('focus-title','The team is ready.');text('focus-text','Start a mission to see the supervisor select an agent, watch tools execute, and follow the results back to the team.');}
 function accept(e, replay=false){
  if(e.mission_id!==missionId) reset(e.mission_id);
@@ -101,9 +118,7 @@ function accept(e, replay=false){
  if(e.kind==='agent_end'&&a){a.state=e.status==='FAILED'||e.status==='PROCUREMENT_FAILED'||['MISSION_FAILED','PROCUREMENT_FAILED'].includes(e.decision)?'issue':'complete';a.time=e.time;a.message=e.message;if(e.agent!=='supervisor')a.summary=e.message;if(active===e.agent)active=null;}
  if(e.kind==='handoff'){route={source:e.source,target:e.target,message:e.message,action:e.action};handoffs++;if(agents[e.target]){selected=e.target;agents[e.target].title=human(e.action)||'Receiving task';if(e.target!=='supervisor')agents[e.target].message=instruction?.target===e.target?instruction.objective:e.message;} }
  if(e.status && e.kind!=='mission_end')text('mission-status',human(e.status));
- if(e.sales_order_id)text('sales-id',`#${e.sales_order_id}`);
- if(e.purchase_order_ids?.length)text('purchase-id',e.purchase_order_ids.map(id=>`#${id}`).join(', '));
- if(e.delivery_id)text('delivery-id',`#${e.delivery_id}`);
+ if(mode==='demo'&&e.erp_records)renderRecords(e.erp_records);
  if(e.kind==='mission_end'){
    ended=new Date(e.time).getTime();active=null;
    for(const a of Object.values(agents)) if(['thinking','executing','active','proposal','reviewing'].includes(a.state))a.state=e.status==='DELIVERED'?'complete':'issue';
@@ -253,12 +268,12 @@ function configure(data){
  const switching=data.mode!==mode;mode=data.mode;
  if(mode==='demo'){demoPaused=data.demo_paused??demoPaused;demoSpeed=data.demo_speed??demoSpeed;}
  else if(switching){const saved=savedLiveView();demoPaused=saved.paused===true;demoSpeed=[.5,1,2,4].includes(saved.speed)?saved.speed:1;}
- token=data.token||token;const badge=$('mode-badge');badge.className='pill '+mode;badge.textContent=mode==='live'?'LIVE · ODOO WORKFLOW':'DEMO · SIMULATED';text('record-mode',mode==='demo'?'DEMO':'ODOO');text('mode-note',mode==='demo'?'Preview the complete flow. No ERP records are changed.':'Creates real Odoo orders and validates receipts and delivery.');
+ token=data.token||token;const badge=$('mode-badge');badge.className='pill '+mode;badge.textContent=mode==='live'?'LIVE · ODOO WORKFLOW':'DEMO · SIMULATED';text('record-mode',mode==='demo'?'DEMO':'ODOO');text('record-note',mode==='demo'?'Simulated · no Odoo records.':'Current mission · updates live.');text('mode-note',mode==='demo'?'Preview the complete flow. No ERP records are changed.':'Creates real Odoo orders and validates receipts and delivery.');
 }
 function snapshot(data){
  configure(data);
  const saved=savedLiveView(),cursor=mode==='live'&&saved.missionId===data.mission_id?Math.min(saved.lastId||0,data.last_id):0;
- reset(data.mission_id);lastId=0;liveQueue=[];beatRemaining=0;sourceOutcome='';
+ reset(data.mission_id);lastId=0;liveQueue=[];beatRemaining=0;sourceOutcome='';sourceBusy=data.busy;
  if(mode==='live'){
   for(const e of data.events){observeSource(e);if(e.id<=cursor)accept(e,true);else liveQueue.push(e);}
   // Completed calls are compacted on the server. Preserve the visible partial
@@ -273,6 +288,7 @@ function snapshot(data){
  settleThinking();
  if(mode==='live'&&saved.missionId===data.mission_id)for(const [key,count] of saved.typing||[])if(thinkingReveal.has(key))thinkingReveal.set(key,{count,credit:0});
  if(busy){$('product').value=data.product;$('quantity').value=data.quantity;}
+ renderRecords(data.erp_records);
  render();
 }
 $('request-form').addEventListener('submit',async event=>{
@@ -298,3 +314,6 @@ async function connect(){
  catch(error){text('form-error','Could not connect to the local dashboard. Keep run_agent_view.py running.');setConnection(false);setTimeout(connect,3000);}
 }
 drawRoutes();connect();
+
+// Smile orders wait until the guided conversation has finished displaying too.
+window.erpBarCanAcceptSmile = () => connected && !busy && !sourceBusy && liveQueue.length === 0 && !hasPendingThinking();

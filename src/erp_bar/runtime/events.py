@@ -110,6 +110,17 @@ def public_result(result):
     product = value.get("product")
     if isinstance(product, dict) and isinstance(product.get("name"), str):
         summary["product_name"] = product["name"]
+    # Preserve document references from actual Odoo tool records, without
+    # exposing arbitrary nested fields or confusing a picking's name with a sale.
+    for key, id_key, name_key in (
+        ("purchase_order", "purchase_order_id", "purchase_order_name"),
+        ("sales_order", "sales_order_id", "sales_order_name"),
+        ("delivery", "picking_id", "delivery_name"),
+    ):
+        record = value.get(key)
+        if (isinstance(record, dict) and type(record.get(id_key)) is int
+                and record[id_key] > 0 and isinstance(record.get("name"), str)):
+            summary[name_key] = clean_text(record["name"], 160)
     return summary
 
 

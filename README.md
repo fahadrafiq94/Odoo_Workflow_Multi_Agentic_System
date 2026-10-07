@@ -1,6 +1,10 @@
-# ERP BAR: Multi-Agent AI Orchestration for Autonomous ERP Order Fulfillment
+# ERP_BAR
 
-A multi-agent order-fulfillment demo that connects local language models to Odoo. A supervisor coordinates Sales, Inventory, and Purchase agents to fulfill a customer request, while a browser dashboard shows agent activity and streamed model text. An optional second computer displays a smile-triggered camera interface beside the real Odoo application.
+A multi-agent order-fulfillment demo that connects local language models to Odoo. A supervisor coordinates Sales, Inventory, and Purchase agents to fulfill a customer request, while a browser dashboard shows agent activity and streamed model text. The main dashboard automatically shows a camera preview and uses a held smile to start one order. An optional second computer follows the real Odoo records.
+
+**Camera on A update (2026-10-07):** Start with [README_CAMERA_ON_A.md](README_CAMERA_ON_A.md) for automatic camera startup, local smile detection and the compact three-panel layout. The older B-camera setup is still available with `--no-camera` on A.
+
+**Base coordinated release: 2026.10.05.1 · protocol 2.** For the automatic two-computer kiosk, start with [README_REALTIME_KIOSK.md](README_REALTIME_KIOSK.md). Update A and B together; the release includes `Start-A.ps1` and `customer_screen/Start-B.ps1` launchers.
 
 > **Live mode changes Odoo records.** It can create and confirm purchase/sales orders and validate receipts and deliveries. Use a dedicated demo/test database. The procurement flow simulates supplier fulfillment by validating the receipt; it does not establish that physical goods have arrived.
 
@@ -24,7 +28,7 @@ A multi-agent order-fulfillment demo that connects local language models to Odoo
 
 ## How it works
 
-1. A customer requests one product and a quantity through the main dashboard. The companion screen can instead request one unit of its configured product, by button or smile.
+1. A customer smiles at A’s dashboard camera to request one unit of the configured product, or opens Manual order to enter a product and quantity. The previous B-camera mode is optional.
 2. The supervisor assigns work to the appropriate specialist.
 3. Inventory identifies the product and checks unreserved stock in the configured warehouse.
 4. If stock is insufficient, Purchase selects an existing supplier, purchases the shortage within policy, and completes the demo receipt flow. Inventory then verifies stock again.
@@ -59,11 +63,12 @@ The main stack is Python, LangGraph, LangChain/Ollama, Pydantic, and a browser U
 | Component | Requirement |
 | --- | --- |
 | Main agent application | Python **3.14+**, as declared in the root `pyproject.toml`. |
-| Camera companion | A **separate Python 3.12 environment**; its supported range is Python 3.11–3.12. |
+| Optional B companion | A **separate Python 3.12 environment**; its supported range is Python 3.11–3.12. |
 | Dependency management | [uv](https://docs.astral.sh/uv/getting-started/installation/). |
 | Live model inference | A running [Ollama](https://ollama.com/) server and a downloaded model. The examples use `qwen3:1.7b`. |
 | Live ERP operations | A reachable Odoo instance with XML-RPC access and the required Sales, Purchase, and Inventory functionality. |
-| Camera/split screen | Webcam, MediaPipe face-landmarker model, and Playwright Chromium on the companion computer. |
+| Camera on A | Webcam and current Chrome/Edge; browser permission and first-run model download. No native camera Python packages. |
+| Optional B display | Separate companion environment and Playwright Chromium. Native MediaPipe/OpenCV are used only when B owns the camera. |
 | Two-computer operation | A trusted private network; the companion must reach the main computer and Odoo. |
 
 The repository does not install or provision Odoo, its database, or Ollama. Available memory and model speed depend on the selected model and computer.
@@ -88,7 +93,7 @@ uv sync --python 3.14 --locked
 uv run python run_agent_view.py --demo
 ```
 
-Open **http://127.0.0.1:8765** if the browser does not open automatically. Start a demo mission and watch the agent diagram and chat.
+Open **http://127.0.0.1:8765** if the browser does not open automatically. Allow camera access and hold a smile to start, or expand **Manual order**. Watch the agent diagram and chat. First launch downloads the browser detector; see [camera setup](README_CAMERA_ON_A.md).
 
 **Demo mode uses simulated workflow events and model text. It does not call Ollama or Odoo and does not require `.env`.** It is also the default when neither `--demo` nor `--live` is supplied.
 
@@ -226,7 +231,7 @@ Despite its filename, this command performs real Odoo writes. Without `--product
 
 The dashboard uses a single-page layout:
 
-- **Left:** mission input and playback/reading controls.
+- **Left:** always-visible camera and smile meter, expandable manual order, mission details and playback/reading controls.
 - **Middle:** supervisor and specialist diagram, communication/activity indicators, current action in the corresponding agent bubble, and mission outcome.
 - **Right:** per-agent model text, revealed progressively with a typing cursor and automatic scrolling. The generated JSON proposal and final customer response are not displayed as right-panel chat messages.
 
@@ -237,6 +242,8 @@ Reading speeds are **0.5×, 1×, 2×, and 4×**. Pause and slower playback help 
 Closing the browser does not cancel an accepted mission.
 
 ## Camera and Odoo on a second computer
+
+**Optional legacy B-camera setup.** The camera now runs on A by default. To keep A’s camera and use B only for Odoo, follow [README_CAMERA_ON_A.md](README_CAMERA_ON_A.md). The examples in this section use `--no-camera` on A to select the previous B-camera flow.
 
 Computer A runs the agents and main dashboard. Computer B runs the webcam interface and opens the real Odoo website beside it. Ollama normally runs on A; Odoo may run on A or another reachable host.
 
@@ -266,6 +273,8 @@ Download the official MediaPipe model into the same directory:
 Invoke-WebRequest -Uri 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' -OutFile face_landmarker.task
 ```
 
+Alternatively, copy your existing compatible `face_landmarker.task` file there. The model and browser binaries are not bundled with the repository.
+
 ### 2. Test pairing in demo mode first
 
 Find Computer A's private IPv4 address with `ipconfig`. The example addresses below are placeholders.
@@ -273,7 +282,7 @@ Find Computer A's private IPv4 address with `ipconfig`. The example addresses be
 On A, from the project root:
 
 ```powershell
-uv run python run_agent_view.py --demo --companion-host 192.168.1.20
+uv run python run_agent_view.py --demo --no-camera --companion-host 192.168.1.20
 ```
 
 This creates `companion_pairing.json` beside the main runner. Copy it privately to B's `customer_screen` directory, beside `run_customer_screen.py`.
@@ -284,7 +293,7 @@ On B:
 uv run python run_customer_screen.py --demo-camera
 ```
 
-Open **http://127.0.0.1:8770**, wait for connection, and use **Run demo mission** or **Start camera → Simulate smile**. This checks the request path without a webcam or real orders. Odoo opening/following is disabled for simulated records. `--demo-camera` is intended for a main system running in demo mode.
+The customer window and simulated camera start automatically at **http://127.0.0.1:8770**. Wait for readiness, then use **Try a demo smile**. This checks the request path without a webcam or real orders. Odoo opening/following is disabled for simulated records. `--demo-camera` is intended for a main system running in demo mode.
 
 For a one-computer test, use `--companion-host 127.0.0.1`, copy the generated pairing file into the local `customer_screen` folder, and run the companion in a second terminal from that folder. Each directory still uses its own Python environment.
 
@@ -293,10 +302,10 @@ For a one-computer test, use `--companion-host 127.0.0.1`, copy the generated pa
 Stop the demo server, then start:
 
 ```powershell
-uv run python run_agent_view.py --live --companion-host 192.168.1.20 --odoo-display-url http://192.168.1.30:8069 --smile-product Lemonade
+uv run python run_agent_view.py --live --no-camera --companion-host 192.168.1.20 --odoo-display-url http://192.168.1.30:8069 --smile-product Lemonade
 ```
 
-Use your actual addresses and an exact existing product name/SKU. The companion's manual and smile requests always order **one unit** of `--smile-product`; the default is `Lemonade`. The main dashboard retains its own product and quantity inputs.
+Use your actual addresses and an exact existing product name/SKU. The companion's smile requests always order **one unit** of `--smile-product`; the default is `Lemonade`. The main dashboard retains its own product and quantity inputs.
 
 Copy the updated `companion_pairing.json` to B and restart the companion without `--demo-camera`:
 
@@ -308,28 +317,28 @@ The Odoo display URL must be reachable from B. `localhost` on B refers to B, not
 
 ### 4. Open the split screen and trigger a mission
 
-1. Wait for **Main system connected** and **LIVE · ODOO** on the customer screen.
-2. Click **Open split screen** to arrange the camera window on the left and Odoo on the right. You may close the original setup tab.
-3. Sign in to Odoo manually, using the same database/company as the agents. The dedicated browser profile remembers that login.
-4. Click **Follow Odoo** in the camera window.
-5. Start a mission using either application's **Start live mission** button, or click **Start camera**, relax your face, then hold a smile briefly.
-6. After completion, select **Next customer** to re-arm the smile trigger.
+1. The camera and customer window start automatically. Wait for **Agent team connected**, **LIVE**, and “Smile to win a [product name].” A verifies the configured product in Odoo before B accepts a smile.
+2. For first-time setup, expand **Setup & connection → Open Odoo / sign in** and sign in to the correct Odoo database/company. The dedicated profile remembers the login.
+3. Hold a smile at **75% or above** for 0.6 seconds. The first customer does not need a neutral expression first.
+4. B saves a stable request ID and submits one request. After A accepts and returns a mission ID and product name, B shows “You won a [product name]!” Demo rewards are explicitly labelled.
+5. Odoo opens beside the camera and follows the mission's records. Sign in if the saved session has expired; following resumes after login. The camera preview stays on, but new smile detection is paused; no customer requests are queued.
+6. When the mission finishes or fails, only the managed Odoo window closes. The camera returns to full size. After the cooldown, a relaxed expression or an empty frame for 1.2 seconds automatically rearms the next customer.
 
-Starting the camera arms one request when the main system is connected and idle. A continuing smile does not repeatedly submit orders. If the camera started while the main system was disconnected or busy, select **Next customer** once it is ready.
+Starting the camera before the connection is ready now waits and arms automatically when the main system becomes ready. The smile meter explains connection, arming, cooldown, and current-request blockers.
 
-The detector uses a 75% smile threshold, five-frame smoothing, a 0.6-second hold, and a 15-second cooldown. It requires a neutral face before a new smile. Frames stay on the camera computer.
+Detection uses five-frame smoothing, a 0.6-second hold at or above 75%, and a 15-second cooldown. A held smile triggers only once per arming; camera frames stay on B. Rearming requires a score below 40% or no face for 1.2 seconds after the mission. The main dashboard's Start live mission button still works and also opens/follows Odoo on B. The companion has no manual order panel.
 
-The manual button works without starting the camera. All launch methods share the main mission lock, so only one mission runs at a time.
-
-If automatic window placement is unavailable, arrange the two windows manually with Windows Snap. Pause Odoo following before manually editing records.
+If automatic placement is unavailable, arrange the two windows with Windows Snap. Pause following before manually editing Odoo. Automatic completion closes only the companion-managed Odoo window, not other Odoo browser sessions. Save manual changes before starting a mission.
 
 ### 5. Understand Odoo following
 
 The companion follows known product, purchase-order, sales-order, and delivery records from workflow events. A creation step can show a list until an actual record ID is available. Purchase receipts are followed through the related purchase order; outbound deliveries use their stock picking.
 
-Distinct record transitions are queued so fast agents do not immediately skip them. Adjacent updates of the same record are coalesced. The default display hold is about 1.2 seconds, and the camera screen shows the number of waiting views.
+Authenticated SSE carries live mission/record updates from A to B, with heartbeats, saved event history and reconnect support. B acknowledges the Odoo window and created draft order views. A waits at most 8 seconds for the window and 4 seconds for each draft order; timeout notices are visible and the workflow continues. Adjust with `--window-wait` and `--display-wait`.
 
-**Odoo always shows current database state, not a historical replay.** A rapidly confirmed order may already appear confirmed when its view opens. The main dashboard's reading speed does not slow this workflow or the Odoo database. Pausing and resuming following jumps to the latest target; a new mission clears the previous display queue.
+Distinct record transitions are queued for display so fast agents do not immediately skip them; customer requests are never queued. Adjacent updates of the same record are coalesced except for a draft view awaiting acknowledgement. The default display hold is about 1.2 seconds, and Setup & connection shows the number of waiting views.
+
+**Odoo always shows current database state, not a historical replay.** Draft-view acknowledgements help show the creation step, but after a timeout or during other fast operations a record may already show its later state. The main dashboard's reading speed affects its presentation only. Pausing and resuming following jumps to the latest target; a new mission clears the previous display queue. Completion closes Odoo and discards any remaining queued views. Replaying completed history after reconnection never reopens an old mission.
 
 ### Optional companion settings
 
@@ -341,7 +350,7 @@ Edit B's `companion_pairing.json` and restart its process:
 | `token` | Shared access token; keep private and matching A. |
 | `odoo_url` | Odoo base URL reachable from B. |
 | `camera_index` | Webcam index; default `0`. Try `1` if another camera is selected. |
-| `model_path` | Model file path; default `face_landmarker.task`, relative to the working directory. |
+| `model_path` | Model file path; default `face_landmarker.task`, relative to `customer_screen`. |
 | `browser_channel` | Default `chromium`; `msedge` or `chrome` can use an installed browser. |
 | `display_hold_seconds` | Delay between queued record views; default `1.2`, accepted range 0–5 seconds. |
 
@@ -410,10 +419,13 @@ uv run python run_agent_view.py --help
 | `--live` | Real model and Odoo workflow; mutually exclusive with `--demo`. |
 | `--port` | Main loopback dashboard port, default `8765`. |
 | `--no-browser` | Start the server without opening a browser automatically. |
+| `--no-camera` | Disable A’s browser camera and use the optional B-camera flow. By default A owns smile detection. |
 | `--companion-host` | Enable pairing on this computer's private IPv4 address, or `127.0.0.1` for local testing. `0.0.0.0` is not accepted. |
 | `--companion-port` | Paired API port, default `8766`; must differ from the dashboard port. |
 | `--smile-product` | Fixed one-unit companion product query; default `Lemonade`. |
 | `--odoo-display-url` | Odoo base URL for the companion; an existing saved value is reused if omitted. |
+| `--window-wait` | Maximum initial Odoo-view wait when B is connected, default 8 seconds; range 0–20. |
+| `--display-wait` | Maximum wait for a created draft order view, default 4 seconds; range 0–10. Zero disables the wait. |
 
 ### Companion runner
 
@@ -427,11 +439,35 @@ uv run python run_customer_screen.py --help
 | --- | --- |
 | `--pairing` | Pairing JSON path; default `companion_pairing.json`. |
 | `--port` | Local customer-screen port, default `8770`. |
-| `--no-browser` | Do not open the initial browser tab automatically. |
+| `--no-browser` | Do not open the customer window automatically; live Odoo following still applies. |
+| `--no-camera` | Do not access the webcam automatically; useful for diagnostics. |
 | `--demo-camera` | Simulated smile button for a paired main system in demo mode. |
 
-## Verification
+## Tests and verification
 
+### Offline regression checks
+
+From the root environment after dependency installation:
+
+```powershell
+$env:PYTHONPATH = "src"
+uv run python -m unittest discover -s tests -p "test_*.py"
+uv run python test_agent_view.py
+uv run python test_decision_stream.py
+uv run python test_conversation_view.py
+uv run python test_second_screen.py
+uv run python test_split_screen.py
+uv run python test_smile_automation.py
+uv run python test_realtime_kiosk.py
+uv run python test_companion_diagnostics.py
+uv run python test_order_failure.py
+uv run python test_supplier_setup.py --mock-model
+uv run python test_procurement_failure.py --mock-model
+```
+
+These targeted checks use controlled model/ERP fixtures; no live Odoo writes or physical webcam are required. Keep `OLLAMA_MODEL` configured in `.env`, since some imported application modules validate its presence even when tests substitute the model. Use `export PYTHONPATH=src` instead of the first line in Bash.
+
+The supplier/procurement scenario scripts use the configured Ollama model if `--mock-model` is omitted. Do not assume every root-level script named `test_*` is offline: the live runner above explicitly writes Odoo records.
 
 ### Environment checks
 
@@ -479,12 +515,33 @@ The companion saves a request ID before sending and reuses it for **Retry the sa
 
 If an accepted request has an uncertain outcome after a crash or disconnect, inspect the actual Odoo orders/transfers and reconcile the result before attempting another customer. Do not delete the ledger or pending file to bypass an uncertain request. Earlier Odoo writes remain even if a later step fails.
 
-Dashboard event history is held in memory; it is not a durable audit log. Restarting the process does not resume an interrupted graph. Closing a browser does not cancel a mission, and stopping the companion does not stop the main workflow. Finish active missions before routine shutdown or updates.
+Dashboard model-text history is held in memory. The paired gateway persists public mission/activity events and request acknowledgements in its SQLite ledger for reconnection and outcome lookup; this is not a complete ERP audit log. Restarting the process does not resume an interrupted graph. Closing a browser does not cancel a mission, and stopping the companion does not stop the main workflow. Finish active missions before routine shutdown or updates.
 
+### Before pushing to GitHub
+
+Ensure credentials, tokens, local state, downloaded models, and browser profiles are excluded. The root ignore file covers the generated companion files; also exclude any custom paths you introduce:
+
+```gitignore
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+companion_pairing.json
+companion_state/
+customer_screen/.venv/
+customer_screen/companion_pairing.json
+customer_screen/customer_state/
+customer_screen/face_landmarker.task
+```
 
 Keep only placeholder values in committed configuration examples. Ignore rules do not remove files already tracked by Git; review `git status` before committing.
 
 ## Troubleshooting
+
+For two-computer issues, follow the [current kiosk checklist](README_REALTIME_KIOSK.md#connection-checklist). With B running, execute `uv run python check_environment.py` from B’s `customer_screen` folder. This read-only command checks pairing, product readiness, protocol/build, stream heartbeat age, network paths, browser setup, and pending-request state without starting a mission.
 
 | Symptom | What to check |
 | --- | --- |
@@ -504,9 +561,9 @@ Keep only placeholder values in committed configuration examples. Ignore rules d
 | Pairing authentication fails | Ensure both computers use the same generated token; do not replace it on only one side. |
 | Camera cannot open | Close competing camera apps, allow desktop camera access in the OS, and check `camera_index`. |
 | Face-landmarker model missing | Download `face_landmarker.task`, launch from `customer_screen`, or set the correct `model_path`. |
-| Smile does not submit | Check connected/idle/armed status, relax before smiling, hold briefly, and use Next customer after the previous request. |
+| Smile does not submit | Check protocol 2, verified reward, connected/idle/armed status and hold 75% for 0.6 seconds. After a mission, let the cooldown finish and relax or step away for 1.2 seconds. |
 | Playwright browser missing | From the companion environment, run `uv run python -m playwright install chromium`. |
-| Odoo window does not follow | Open split screen, complete login to the correct database/company, then enable Follow Odoo; verify B's Odoo URL and deployed routes. |
+| Odoo window does not follow | In Setup & connection, open Odoo, complete login to the correct database/company, then enable Follow Odoo; verify B's Odoo URL, Playwright install and deployed routes. |
 | UI is behind live actions | Reading speed affects presentation. Use Jump to latest; queued Odoo views also take time to catch up. |
 | Port already in use | Stop the previous server or choose another `--port`/`--companion-port`; update pairing when changing the paired endpoint. |
 | Request outcome is uncertain | Preserve state and reconcile the actual Odoo records before retrying or starting another customer. |
@@ -525,7 +582,8 @@ Keep only placeholder values in committed configuration examples. Ignore rules d
 
 ## References
 
-- [Detailed camera and Odoo split-screen notes](README_CAMERA_ODOO_SPLIT.md)
+- [Current smile automation update](README_SMILE_AUTOMATION.md)
+- [Earlier camera and Odoo split-screen notes](README_CAMERA_ODOO_SPLIT.md)
 - [uv installation](https://docs.astral.sh/uv/getting-started/installation/) and [project environments](https://docs.astral.sh/uv/guides/projects/)
 - [Ollama CLI](https://docs.ollama.com/cli) and [Qwen3 model](https://ollama.com/library/qwen3:1.7b)
 - [MediaPipe Face Landmarker for Python](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker/python)

@@ -222,6 +222,7 @@ class CustomerApp:
     def eligible(self):
         return (self.connected and time.monotonic() - self.last_poll < 4 and not self.processing_error
                 and self.remote.get('protocol') == PROTOCOL and self.remote.get('product_ready') is True
+                and self.remote.get('smile_source', 'companion') == 'companion'
                 and not self.remote.get('busy') and not self.submitting and not self.recovering
                 and (not self.pending or self.pending.get('terminal')))
 
@@ -466,6 +467,8 @@ class CustomerApp:
                 phase, title, instruction = 'working', reward or 'The agents are working', 'Preparing the current order. New smiles are paused.'
             elif pending and not pending.get('terminal'):
                 phase, title, instruction = 'checking', reward or 'Checking your request', 'Waiting for A to confirm the result. No new request will be sent.'
+            elif remote.get('smile_source') == 'dashboard':
+                phase, title, instruction = 'ready', 'Smile on Computer A', 'This screen follows the team’s Odoo actions automatically.'
             elif not remote.get('product_ready'):
                 phase, title, instruction = 'checking', 'Checking the reward', remote.get('readiness_message') or 'Waiting for the Odoo product check.'
             elif not self.camera_running:

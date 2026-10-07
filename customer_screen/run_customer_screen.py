@@ -27,7 +27,7 @@ def main():
     print(f'ERP_BAR customer screen: {url}')
     print(f'Build {BUILD} · pairing: {pairing}')
     print(f'Main system: {app.brain.url} · Odoo: {app.config.get("odoo_url") or "NOT CONFIGURED"}')
-    print('Camera starts automatically. Wait for Ready, then hold a smile at 75% or above. One customer at a time; relax after completion to welcome the next customer.')
+    print('Odoo follower mode: smile on Computer A.' if args.no_camera else 'Camera starts automatically. Wait for Ready, then hold a smile at 75% or above. One customer at a time; relax after completion to welcome the next customer.')
     if not args.no_browser:
         app.odoo.open_camera(url)
     try:

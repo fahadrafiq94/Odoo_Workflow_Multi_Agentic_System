@@ -19,6 +19,7 @@ def main():
     mode.add_argument("--live", action="store_true", help="Use configured agents, Ollama and real Odoo actions")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-camera", action="store_true", help="Disable A’s browser camera; keep B as the smile trigger")
     parser.add_argument("--companion-host", help="Private IP of this computer; enables the paired second-screen API")
     parser.add_argument("--companion-port", type=int, default=8766)
     parser.add_argument("--smile-product", default="Lemonade")
@@ -44,12 +45,11 @@ def main():
         load_dotenv(ROOT / ".env")
     from erp_bar.agent_view.server import Session, make_server
     session = Session(live=args.live)
-    server = make_server(session, args.port)
-    companion = None
-    if args.companion_host:
+    companion = gateway = assets = None
+    if args.companion_host or not args.no_camera:
         from erp_bar.agent_view.companion_gateway import CompanionGateway, make_companion_server, BUILD, PROTOCOL
         pairing_path = ROOT / "companion_pairing.json"
-        previous = json.loads(pairing_path.read_text()) if pairing_path.exists() else {}
+        previous = json.loads(pairing_path.read_text()) if args.companion_host and pairing_path.exists() else {}
         pairing = {**previous, "brain_url": f"http://{args.companion_host}:{args.companion_port}",
                    "token": previous.get("token") or secrets.token_urlsafe(40),
                    "odoo_url": args.odoo_display_url or previous.get("odoo_url", ""),
@@ -57,13 +57,21 @@ def main():
         for key, value in {"camera_index": 0, "model_path": "face_landmarker.task", "browser_channel": "chromium"}.items():
             pairing.setdefault(key, value)
         gateway = CompanionGateway(session, pairing["token"], args.smile_product, ROOT / "companion_state" / "requests.sqlite3",
-                                   display_wait_seconds=args.display_wait, window_wait_seconds=args.window_wait)
+                                   display_wait_seconds=args.display_wait, window_wait_seconds=args.window_wait,
+                                   smile_source="companion" if args.no_camera else "dashboard")
+        gateway.start()
+    if args.companion_host:
         companion = make_companion_server(gateway, args.companion_host, args.companion_port)
         pairing_path.write_text(json.dumps(pairing, indent=2))
         pairing_path.chmod(0o600)
         threading.Thread(target=companion.serve_forever, daemon=True).start()
         print(f"Second screen enabled. Copy {pairing_path.name} privately to the second computer.")
         print(f"Release {BUILD} · protocol {PROTOCOL} · SSE: {pairing['brain_url']}/v1/events")
+    if not args.no_camera:
+        from erp_bar.agent_view.camera_assets import CameraAssets
+        assets = CameraAssets()
+        assets.start()
+    server = make_server(session, args.port, gateway if not args.no_camera else None, assets)
     url = f"http://127.0.0.1:{args.port}"
     print(f"ERP_BAR agent view: {url}")
     print("LIVE: starting a mission writes Odoo orders and validates receipts/delivery." if args.live
@@ -76,6 +84,8 @@ def main():
         print("\nDashboard stopped. Closing the browser alone does not cancel a running mission.")
     finally:
         server.server_close()
+        if gateway:
+            gateway.close()
         if companion:
             companion.shutdown()
             companion.server_close()

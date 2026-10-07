@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from erp_bar.runtime.events import agent_scope, emit, event_sink, mission_snapshot
+from erp_bar.agent_view.records import MissionRecords
 
 STATIC = Path(__file__).with_name("static")
 
@@ -35,12 +36,15 @@ class Session:
         self.before_work = None
         self.after_event = None
         self.expected_product_id = None
+        self.erp_records = MissionRecords()
 
     def publish(self, event):
         with self.condition:
             self.sequence += 1
             event = {**event, "id": self.sequence, "mission_id": self.mission_id,
                      "time": datetime.now(timezone.utc).isoformat(), "demo": not self.live}
+            if self.erp_records.update(event):
+                event["erp_records"] = self.erp_records.snapshot()
             if event.get("kind") == "model_stream_end":
                 # Keep the full final generation, not thousands of token events.
                 # Connected clients get deltas; reconnecting clients get this snapshot.
@@ -61,7 +65,8 @@ class Session:
             return {"mode": "live" if self.live else "demo", "busy": self.busy,
                     "demo_paused": self.demo_paused, "demo_speed": self.demo_speed,
                     "mission_id": self.mission_id, "product": self.product, "quantity": self.quantity,
-                    "last_id": self.sequence, "events": list(self.events)}
+                    "last_id": self.sequence, "events": list(self.events),
+                    "erp_records": self.erp_records.snapshot()}
 
     def control_demo(self, paused, speed):
         if self.live:
@@ -262,7 +267,7 @@ def run_demo(session):
          message=f"Demo complete: {session.quantity:g} × {session.product} delivered. No Odoo records were changed.")
 
 
-def make_server(session, port=8765):
+def make_server(session, port=8765, camera_gateway=None, camera_assets=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -277,7 +282,7 @@ def make_server(session, port=8765):
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(payload)
 
@@ -287,9 +292,29 @@ def make_server(session, port=8765):
             path = urlsplit(self.path).path
             if path == "/api/state":
                 return self.reply(200, {**session.snapshot(), "token":session.token})
+            if path == "/api/camera-state":
+                if camera_gateway is None:
+                    return self.reply(200, {"enabled": False})
+                state = camera_gateway.snapshot()
+                keys = ("busy", "mission_id", "mode", "product_ready", "product_info", "readiness_message", "smile_source")
+                return self.reply(200, {"enabled": True, "token": session.token,
+                    **{key: state[key] for key in keys}, "assets": camera_assets.snapshot()})
+            if path.startswith("/api/smile-requests/") and camera_gateway:
+                try:
+                    return self.reply(200, camera_gateway.request_state(path.rsplit("/", 1)[-1]))
+                except ValueError as exc:
+                    return self.reply(400, {"error": str(exc)})
+            if path.startswith("/camera-assets/") and camera_assets:
+                asset = camera_assets.asset(path[len("/camera-assets/"):])
+                if asset:
+                    filename, mime = asset
+                    return self.reply(200, filename.read_bytes(), mime)
+                return self.reply(404, {"error": "Camera asset unavailable"})
             if path == "/api/events":
                 return self.stream()
             files = {"/": ("index.html","text/html"), "/app.js": ("app.js","text/javascript"), "/style.css": ("style.css","text/css")}
+            for name in ("dashboard-camera.js", "camera-worker.js", "smile-gate.mjs"):
+                files["/" + name] = (name, "text/javascript")
             if path not in files:
                 return self.reply(404, {"error":"Not found"})
             filename, mime = files[path]
@@ -300,7 +325,7 @@ def make_server(session, port=8765):
             if (not self.allowed() or self.headers.get("Origin", "http://" + host) != "http://" + host
                     or not secrets.compare_digest(self.headers.get("X-ERP-Bar-Token", ""), session.token)):
                 return self.reply(403, {"error":"Reload the dashboard before starting a mission."})
-            if self.path not in ("/api/missions", "/api/demo-control"):
+            if self.path not in ("/api/missions", "/api/demo-control", "/api/smile"):
                 return self.reply(404, {"error":"Not found"})
             try:
                 size = int(self.headers.get("Content-Length", "0"))
@@ -309,6 +334,15 @@ def make_server(session, port=8765):
                 data = json.loads(self.rfile.read(size))
                 if not isinstance(data, dict):
                     raise ValueError("Expected a request object.")
+                if self.path == "/api/smile":
+                    if camera_gateway is None:
+                        return self.reply(404, {"error": "Dashboard camera disabled", "accepted": False})
+                    from .companion_gateway import RequestRejected
+                    try:
+                        mission = camera_gateway.request(data.get("request_id"), source="dashboard")
+                    except RequestRejected as exc:
+                        return self.reply(409, {"accepted": False, "error": str(exc), "code": exc.code})
+                    return self.reply(202, {"mission_id": mission, "accepted": True})
                 if self.path == "/api/demo-control":
                     session.control_demo(data.get("paused"), data.get("speed"))
                     return self.reply(200, {"paused": session.demo_paused, "speed": session.demo_speed})

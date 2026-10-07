@@ -61,12 +61,15 @@ class RequestRejected(RuntimeError):
 
 class CompanionGateway:
     def __init__(self, session, token, product, ledger_path, product_resolver=None,
-                 display_wait_seconds=4, window_wait_seconds=8):
+                 display_wait_seconds=4, window_wait_seconds=8, smile_source="companion"):
         if len(token) < 32:
             raise ValueError('Pairing token must have at least 32 characters.')
         if not isinstance(product, str) or not product.strip() or len(product) > 120:
             raise ValueError('Choose a valid smile product name.')
         self.session, self.token, self.product = session, token, product.strip()
+        if smile_source not in ("dashboard", "companion"):
+            raise ValueError("Unknown smile source")
+        self.smile_source = smile_source
         self.instance_id = uuid4().hex[:12]
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -183,7 +186,7 @@ class CompanionGateway:
             self.ready_views.add(key)
             self.views.notify_all()
 
-    def request(self, request_id):
+    def request(self, request_id, source="companion"):
         if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{16,74}', request_id):
             raise ValueError('A stable request identifier is required.')
         # Always acquire Session before gateway locks, matching event publication.
@@ -194,6 +197,8 @@ class CompanionGateway:
                     if row[1] != 'accepted':
                         raise RuntimeError('Request outcome is uncertain. Staff must check the main system before another attempt.')
                     return row[0]
+                if source != self.smile_source:
+                    raise RequestRejected("Smile detection is active on Computer A." if self.smile_source == "dashboard" else "Smile detection is active on Computer B.", "wrong_source")
                 if self.session.busy:
                     raise RequestRejected('The agents are handling another customer. This request was not queued.', 'busy')
                 if not self.product_info or (self.session.live and time.monotonic() - self.product_checked > 60):
@@ -250,7 +255,7 @@ class CompanionGateway:
                 'mode': data['mode'], 'busy': data['busy'], 'mission_id': data['mission_id'],
                 'last_id': data['last_id'], 'events': events,
                 'odoo_target': targets[-1] if targets else None, 'odoo_targets': targets,
-                'smile_product': self.product, 'smile_quantity': 1,
+                'smile_product': self.product, 'smile_quantity': 1, 'smile_source': self.smile_source,
                 'product_info': info, 'product_ready': ready,
                 'readiness_message': product_error if not ready else ('Preparing the current order.' if data['busy'] else 'Ready for a smile.'),
                 'accepting_requests': ready and not data['busy'],
