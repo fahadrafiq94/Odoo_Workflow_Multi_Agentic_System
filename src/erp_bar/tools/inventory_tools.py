@@ -1,3 +1,4 @@
+from erp_bar.runtime.product_identity import current_product_identity
 from erp_bar.runtime.events import observed_tool
 
 from erp_bar.odoo.client import (
@@ -24,9 +25,16 @@ def search_product(
     try:
         bridge = get_odoo_bridge()
 
-        product = bridge.search_product(
-            tool_input.query
-        )
+        identity = current_product_identity()
+        if identity is not None:
+            if tool_input.query.strip().casefold() != identity['query']:
+                raise ValueError('Product query differs from this smile request.')
+            # The .env ID owns identity. Duplicate names cannot select another row.
+            product = bridge._read_product(identity['product_id'])
+            if product is None or product.get('product_id') != identity['product_id']:
+                raise ValueError('The configured smile product is no longer available.')
+        else:
+            product = bridge.search_product(tool_input.query)
 
         if product is None:
             return SearchProductResult(
@@ -64,6 +72,8 @@ def create_product(
     tool_input: CreateProductInput,
 ) -> CreateProductResult:
     try:
+        if current_product_identity() is not None:
+            raise ValueError('Smile orders use an existing configured product; product creation is disabled.')
         bridge = get_odoo_bridge()
 
         product = bridge.create_product(

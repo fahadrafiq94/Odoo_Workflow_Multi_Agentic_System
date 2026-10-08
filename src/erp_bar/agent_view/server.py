@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from erp_bar.runtime.events import agent_scope, emit, event_sink, mission_snapshot
 from erp_bar.agent_view.records import MissionRecords
+from erp_bar.runtime.product_identity import bound_product_identity
 
 STATIC = Path(__file__).with_name("static")
 
@@ -114,7 +115,7 @@ class Session:
             return self.mission_id
 
     def _work(self):
-        with event_sink(self.publish):
+        with event_sink(self.publish), bound_product_identity(self.expected_product_id, self.product):
             try:
                 if self.before_work:
                     self.before_work(self.mission_id)

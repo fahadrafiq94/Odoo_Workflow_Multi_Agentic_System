@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--no-camera", action="store_true", help="Disable A’s browser camera; keep B as the smile trigger")
     parser.add_argument("--companion-host", help="Private IP of this computer; enables the paired second-screen API")
     parser.add_argument("--companion-port", type=int, default=8766)
-    parser.add_argument("--smile-product", default="Lemonade")
+    parser.add_argument("--smile-product", default="Lemonade", help="Demo product label only; live smiles use ODOO_PRODUCT_TEMPLATE_ID from .env")
     parser.add_argument("--odoo-display-url", default="", help="Odoo URL reachable from the second computer")
     parser.add_argument("--display-wait", type=float, default=4, help="Maximum seconds to wait for a draft order view on B (0 disables)")
     parser.add_argument("--window-wait", type=float, default=8, help="Maximum seconds to wait for B's Odoo window at mission start")
@@ -76,6 +76,8 @@ def main():
     print(f"ERP_BAR agent view: {url}")
     print("LIVE: starting a mission writes Odoo orders and validates receipts/delivery." if args.live
           else "DEMO: all displayed workflow events are simulated; no Odoo or Ollama access.")
+    if args.live and gateway:
+        print("Live smile product: ODOO_PRODUCT_TEMPLATE_ID from .env (--smile-product is ignored in live mode).")
     if not args.no_browser:
         webbrowser.open(url)
     try:

@@ -119,7 +119,11 @@ class CompanionGateway:
             info = self.product_resolver(self.product)
             if not isinstance(info, dict) or type(info.get('product_id')) is not int or info['product_id'] <= 0 or not isinstance(info.get('name'), str) or not info['name'].strip():
                 raise ValueError('The product lookup returned no verified product identity.')
-            info = {'product_id': info['product_id'], 'name': info['name'], 'query': self.product, 'quantity': 1, 'simulated': False}
+            query = info.get('query', self.product)
+            if not isinstance(query, str) or not query.strip() or len(query.strip()) > 120:
+                raise ValueError('The configured product has no valid mission query.')
+            info = {'product_id': info['product_id'], 'product_template_id': info.get('product_template_id'),
+                    'name': info['name'], 'query': query.strip(), 'quantity': 1, 'simulated': False}
             error = ''
         except Exception as exc:
             info = None
@@ -205,7 +209,7 @@ class CompanionGateway:
                     raise RequestRejected(self.product_error or 'Product information is stale; waiting for a fresh Odoo check.')
                 db.execute('INSERT INTO requests VALUES (?, NULL, ?)', (request_id, 'pending'))
                 db.execute('INSERT INTO companion_request_details VALUES (?,?)', (request_id, json.dumps(self.product_info)))
-            mission_id = self.session.start(self.product, 1, 'smile-' + request_id,
+            mission_id = self.session.start(self.product_info['query'], 1, 'smile-' + request_id,
                                             expected_product_id=self.product_info.get('product_id'))
             with self.connect() as db:
                 db.execute('UPDATE requests SET mission_id=?, state=? WHERE request_id=?', (mission_id, 'accepted', request_id))
@@ -255,7 +259,7 @@ class CompanionGateway:
                 'mode': data['mode'], 'busy': data['busy'], 'mission_id': data['mission_id'],
                 'last_id': data['last_id'], 'events': events,
                 'odoo_target': targets[-1] if targets else None, 'odoo_targets': targets,
-                'smile_product': self.product, 'smile_quantity': 1, 'smile_source': self.smile_source,
+                'smile_product': info['name'] if info else self.product, 'smile_quantity': 1, 'smile_source': self.smile_source,
                 'product_info': info, 'product_ready': ready,
                 'readiness_message': product_error if not ready else ('Preparing the current order.' if data['busy'] else 'Ready for a smile.'),
                 'accepting_requests': ready and not data['busy'],
